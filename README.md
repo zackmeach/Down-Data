@@ -45,15 +45,47 @@ var/data/       # Created on demand; holds Parquet partitions and DuckDB cache
 
 ## Data architecture
 
-* **Parquet storage** – Data is persisted to Parquet files partitioned by
-  `league/season` for the `raw`, `clean`, and `modeled` stages. Versioned files
-  are created automatically so you can roll back if necessary.
-* **DuckDB caching** – DuckDB reads the Parquet files directly for ad-hoc
-  exploration. When queries become heavy or frequently reused, you can
-  materialise them as tables or views in `warehouse.duckdb`.
-* **Cache invalidation** – After ETL or data recomputation, invalidate dependent
-  DuckDB objects to avoid stale results. The helper classes provide convenience
-  methods for this workflow.
+Down Data organises every `nfl_data_py` export into a miniature lakehouse so the
+desktop UI and supporting scripts all work with the same, reliable datasets.
+
+### Storage layout
+
+*The `DataRepository` class provides the storage backbone.* It initialises a
+`var/data` directory with `raw`, `clean`, and `modeled` zones alongside a
+`warehouse` folder for DuckDB caches. Within each zone, datasets are partitioned
+by league and season (for example `raw/nfl/season=2023/weekly/`) and each write
+is versioned with a timestamped Parquet filename plus a convenience `latest`
+file for quick access.
+
+### Lifecycle of a dataset
+
+1. **Ingestion from `nfl_data_py`.** `DataPipeline.ingest_raw` looks up the
+   appropriate loader (e.g. `import_weekly_data`) and downloads the selected
+   season before persisting the result in the raw zone.
+2. **Promotion to the clean layer.** `promote_to_clean` reloads the raw data,
+   applies an arbitrary transformation callable, writes the output to the clean
+   zone, and clears any dependent DuckDB caches so downstream queries see the
+   update.
+3. **Modeled datasets and caching.** `build_modeled_dataset` executes DuckDB SQL
+   against the Parquet lake, stores the modeled table back to Parquet, and can
+   optionally materialise the same query in DuckDB while invalidating related
+   caches.
+
+### DuckDB integration
+
+The `DuckDBWarehouse` wrapper keeps a single DuckDB connection pointed at the
+repository’s `warehouse.duckdb` file, registers Parquet views on demand, and
+offers helper methods to run parameterised queries, materialise tables, and drop
+stale objects when the pipeline invalidates caches.
+
+### How the application uses the data
+
+Both the GUI entry point and the CLI bootstrap script instantiate the
+`DataRepository`, `DuckDBWarehouse`, and `DataPipeline` together so they share
+the same on-disk assets. The PySide6 app passes the pipeline into the main
+window for interactive exploration, while the `scripts/bootstrap_data.py`
+utility drives the same pipeline to fetch, clean, and model seasons from the
+command line.
 
 ## Development
 
