@@ -19,8 +19,9 @@ from PySide6.QtCore import (
     Qt,
     QTimer,
 )
-from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPixmap
+from PySide6.QtGui import QColor, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
+    QAction,
     QApplication,
     QCompleter,
     QComboBox,

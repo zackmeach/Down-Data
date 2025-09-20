@@ -7,7 +7,7 @@ DuckDB providing lightning-fast analytics directly against those files.
 
 ## Getting started
 
-1. Create and activate a Python 3.10+ environment.
+1. Create and activate a Python 3.10.x environment (3.10 only).
 2. Install dependencies:
 
    ```bash
@@ -26,7 +26,7 @@ DuckDB providing lightning-fast analytics directly against those files.
 4. Launch the desktop app:
 
    ```bash
-   python -m app.main
+   python -m app.main  # using Python 3.10
    ```
 
    The interface always opens in a maximised 16:9 layout to stay consistent on

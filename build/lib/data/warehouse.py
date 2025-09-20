@@ -16,14 +16,7 @@ class DuckDBWarehouse:
     def __init__(self, repository: DataRepository) -> None:
         self.repository = repository
         self._connection = duckdb.connect(repository.duckdb_file.as_posix())
-        # Use a concrete number of threads for compatibility
-        try:
-            import os
-
-            cpu_count = os.cpu_count() or 1
-        except Exception:
-            cpu_count = 1
-        self._connection.execute(f"PRAGMA threads={int(cpu_count)};")
+        self._connection.execute("PRAGMA threads=system;")
 
     @property
     def connection(self) -> duckdb.DuckDBPyConnection:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import timezone, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -13,7 +13,7 @@ _STAGE_NAMES = ("raw", "clean", "modeled")
 
 
 def _timestamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
 
 
 @dataclass

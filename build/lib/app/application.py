@@ -5,19 +5,18 @@ from __future__ import annotations
 import sys
 from typing import Iterable, Optional
 
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication
 
 
-def _preconfigure_high_dpi() -> None:
-    """Enable high DPI scaling before creating the QApplication instance."""
+def _configure_high_dpi(application: QApplication) -> None:
+    """Enable high DPI scaling so the UI looks crisp on modern displays."""
 
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        QGuiApplication.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
-    QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps)
+    application.setAttribute(QApplication.AA_EnableHighDpiScaling)
+    application.setAttribute(QApplication.AA_UseHighDpiPixmaps)
 
 
 def create_app(argv: Optional[Iterable[str]] = None) -> QApplication:
@@ -31,11 +30,12 @@ def create_app(argv: Optional[Iterable[str]] = None) -> QApplication:
     """
 
     args = list(argv) if argv is not None else sys.argv
-    _preconfigure_high_dpi()
     app = QApplication(args)
     app.setApplicationDisplayName("Down Data")
     app.setApplicationName("Down Data")
     app.setApplicationVersion("0.1.0")
+
+    _configure_high_dpi(app)
 
     return app
 

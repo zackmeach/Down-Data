@@ -48,9 +48,8 @@ class DataBrowserPage(BasePage):
     description = "Inspect league datasets and understand the available fields."
 
     def __init__(self, *, parent=None) -> None:
-        # Ensure model exists before layout is constructed in BasePage.__init__
-        self._table_model = _DataFrameModel()
         super().__init__(parent=parent)
+        self._table_model = _DataFrameModel()
 
     def _init_layout(self) -> None:
         layout = QVBoxLayout(self)
