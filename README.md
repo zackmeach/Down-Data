@@ -8,6 +8,17 @@ with the same name by optionally supplying team, draft year, draft team, or posi
 multiple candidates remain. Once instantiated, the `Player` keeps key identifiers and biographical details in memory and exposes an
 entry point for loading nflverse stats on demand.
 
+## Dependencies
+
+The core `Player` class relies on the following Python packages:
+
+- [`polars`](https://pola.rs/) for fast in-memory data manipulation.
+- [`nflreadpy`](https://github.com/nflverse/nflreadr) for downloading nflverse datasets.
+- [`pandas`](https://pandas.pydata.org/) for the optional `get_master_stats_table()` export helper.
+- [`rich`](https://rich.readthedocs.io/) for the interactive terminal explorer in `main.py`.
+
+Install them with `pip install -r requirements.txt` before running the examples below.
+
 ## Data Availability & Limitations
 
 **Player Profile Data**: Available for all NFL players across all eras, including historical players. This includes biographical
@@ -121,6 +132,14 @@ nextgen = player.fetch_nextgen_stats(seasons=[2023], stat_type="receiving")
 avg_separation = nextgen['avg_separation'].mean()
 avg_cushion = nextgen['avg_cushion'].mean()
 ```
+
+## Known limitations
+
+- **Seasonal aggregation for rate stats** – `get_master_stats_table()` currently sums every numeric column when collapsing
+  weekly stats to the season level. Rate metrics such as completion percentage or EPA per play will therefore be inflated and
+  should be recomputed downstream if you need precise season averages.
+- **NextGen player matching** – NextGen datasets lack a stable GSIS identifier, so `fetch_nextgen_stats()` matches on
+  `player_display_name`. Players who share the same display name may require additional filtering before analysis.
 
 ## Extending the system
 
