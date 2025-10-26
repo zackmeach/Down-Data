@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Data files - don't commit CSVs or proprietary data
+data/raw/**/*.csv
+data/exports/*.csv
+data/exports/*.xlsx
+
+# Keep README files for documentation
+!data/raw/pfr/README.md
+!data/exports/README.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
+
+# Jupyter Notebooks (if you add them later)
+.ipynb_checkpoints/
+*.ipynb
+
+# Environment
+.env
+.env.local
+
+

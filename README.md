@@ -72,6 +72,7 @@ stats = player.fetch_stats(seasons=[1999, 2000])  # Works if player was active
   - `get_career_stats()` calculates career totals with position-specific stat aggregations (sacks, tackles for defensive; yards, TDs for offensive)
   - `get_master_stats_table()` generates a comprehensive Pandas DataFrame with one row per season and all available stat categories as columns - perfect for exporting to CSV/Excel or further analysis
   - `fetch_nextgen_stats()` accesses NFL's official advanced tracking metrics (2016+) including separation, time to throw, yards over expected, etc.
+  - `fetch_coverage_stats()` extracts partial coverage data from play-by-play for defensive players (limited - see COVERAGE_STATS_RESEARCH.md)
   - Position-aware helpers: `is_defensive()`, `get_relevant_stat_columns()`, `get_nextgen_stat_type()` automatically detect appropriate stat types
 * **Rich-powered CLI** – `main.py` builds an interactive prompt with Rich panels, prompts, and tables. It guides you through player
   lookup, displays the stored profile, and optionally previews per-season stats (first five rows) for the seasons you enter. The CLI

@@ -8,11 +8,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import date
 import logging
+from pathlib import Path
 import re
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 import polars as pl
-from nflreadpy import load_ff_playerids, load_nextgen_stats, load_player_stats, load_players, load_teams
+from nflreadpy import load_ff_playerids, load_nextgen_stats, load_pbp, load_player_stats, load_players, load_teams
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,11 @@ LATEST_SEASON_AVAILABLE = 2025  # Updated as new seasons become available
 
 # NextGen Stats availability (NFL's official advanced tracking metrics)
 EARLIEST_NEXTGEN_SEASON = 2016
+
+# Pro Football Reference Advanced Stats availability
+EARLIEST_PFR_SEASON = 2018
+LATEST_PFR_SEASON = 2024
+PFR_DATA_DIR = Path(__file__).parent / "data" / "raw" / "pfr"
 
 
 class PlayerNotFoundError(RuntimeError):
@@ -622,6 +628,363 @@ class Player:
         """Return cached NextGen stats if they have been fetched previously."""
         cache_key = f"nextgen_stats_{stat_type}"
         return self._cache.get(cache_key)
+
+    def fetch_pfr_advanced_stats(
+        self,
+        *,
+        seasons: Union[None, Iterable[int]] = None,
+        stat_type: str = "passing",
+    ) -> pl.DataFrame:
+        """
+        Load Pro Football Reference Advanced Stats from local CSV files (2018-2024).
+        
+        PFR Advanced Stats provide detailed film room analytics including:
+        - Passing: Air yards breakdown (IAY/CAY/YAC), accuracy metrics, pocket time, pressure
+        - Rushing: Yards before/after contact, broken tackles
+        - Receiving: Target quality, ADOT, YBC/YAC breakdown, drops
+        - Defense: Coverage stats, pass rush metrics, missed tackles
+        
+        Args:
+            seasons: Season(s) to load. If None, loads all available seasons (2018-2024).
+                    Only seasons from 2018-2024 are available.
+            stat_type: Type of stats to load:
+                - "passing": Advanced passing metrics
+                - "rushing": Advanced rushing metrics
+                - "receiving": Advanced receiving metrics
+                - "defense": Advanced defensive metrics
+        
+        Returns:
+            Polars DataFrame with PFR Advanced Statistics.
+            
+        Raises:
+            SeasonNotAvailableError: If any requested season is outside 2018-2024.
+            FileNotFoundError: If CSV files are missing.
+            ValueError: If player doesn't have a PFR ID.
+        """
+        # Validate player has PFR ID
+        if not self.profile.pfr_id:
+            raise ValueError(
+                f"Player {self.profile.full_name} does not have a Pro Football Reference ID. "
+                "PFR advanced stats require a valid PFR ID for matching."
+            )
+        
+        # Validate seasons
+        if seasons is None:
+            # Load all available PFR seasons
+            seasons_to_load = list(range(EARLIEST_PFR_SEASON, LATEST_PFR_SEASON + 1))
+        else:
+            seasons_to_load = list(seasons)
+            invalid_seasons = [s for s in seasons_to_load if s < EARLIEST_PFR_SEASON or s > LATEST_PFR_SEASON]
+            
+            if invalid_seasons:
+                raise SeasonNotAvailableError(
+                    f"PFR Advanced Stats are only available from {EARLIEST_PFR_SEASON} to {LATEST_PFR_SEASON}. "
+                    f"Invalid seasons requested: {invalid_seasons}."
+                )
+        
+        # Map stat_type to file prefix
+        file_prefix_map = {
+            "passing": "pfr_passing_advanced",
+            "rushing": "pfr_rushing_advanced",
+            "receiving": "pfr_receiving_advanced",
+            "defense": "pfr_defense_advanced",
+        }
+        
+        if stat_type not in file_prefix_map:
+            raise ValueError(
+                f"Invalid stat_type '{stat_type}'. Must be one of: {list(file_prefix_map.keys())}"
+            )
+        
+        file_prefix = file_prefix_map[stat_type]
+        
+        # Load and combine data from all requested seasons
+        all_data = []
+        for season in seasons_to_load:
+            csv_path = PFR_DATA_DIR / f"{file_prefix}_{season}.csv"
+            
+            if not csv_path.exists():
+                logger.warning(f"PFR CSV file not found: {csv_path}")
+                continue
+            
+            try:
+                # Read CSV and add season column
+                df = pl.read_csv(csv_path)
+                
+                # The last column is the PFR ID (column name is -9999)
+                # Filter to this player's PFR ID
+                pfr_id_col = df.columns[-1]
+                player_data = df.filter(pl.col(pfr_id_col) == self.profile.pfr_id)
+                
+                if player_data.height > 0:
+                    # Add season column
+                    player_data = player_data.with_columns(pl.lit(season).alias("season"))
+                    all_data.append(player_data)
+                    
+            except Exception as e:
+                logger.warning(f"Error reading {csv_path}: {e}")
+                continue
+        
+        if not all_data:
+            # Return empty DataFrame with proper schema
+            logger.info(
+                f"No PFR {stat_type} data found for {self.profile.full_name} "
+                f"(PFR ID: {self.profile.pfr_id}) in seasons {seasons_to_load}"
+            )
+            return pl.DataFrame()
+        
+        # Combine all seasons
+        combined = pl.concat(all_data, how="vertical_relaxed")
+        
+        # Cache the result
+        cache_key = f"pfr_stats_{stat_type}"
+        self._cache[cache_key] = combined
+        
+        return combined
+
+    def cached_pfr_stats(self, stat_type: str = "passing") -> Optional[pl.DataFrame]:
+        """Return cached PFR stats if they have been fetched previously."""
+        cache_key = f"pfr_stats_{stat_type}"
+        return self._cache.get(cache_key)
+
+    def fetch_pbp(
+        self,
+        *,
+        seasons: Union[None, bool, Iterable[int]] = None,
+    ) -> pl.DataFrame:
+        """
+        Load play-by-play data for all plays involving this player (1999-2025).
+        
+        Returns every play where the player was involved in any capacity:
+        - Offensive plays: passer, rusher, receiver, lateral receiver
+        - Defensive plays: tackler, pass defender, interception, fumble recovery
+        - Special teams: kicker, punter, returner, etc.
+        
+        Each row represents a single play with full game context including:
+        - Score, time remaining, field position
+        - Down, distance, quarter
+        - Play outcome (yards gained, touchdown, etc.)
+        - EPA, WPA, success metrics
+        
+        Args:
+            seasons: Season(s) to load. If None, loads current season.
+                    If True, loads all available seasons (1999-2025).
+                    
+        Returns:
+            Polars DataFrame with all plays involving this player.
+            
+        Raises:
+            SeasonNotAvailableError: If any requested season is outside 1999-2025.
+            
+        Note:
+            Data quality varies by era:
+            - 2016-2025: Excellent player attribution (~98-99%)
+            - 2011-2015: Good player attribution (~95%)
+            - 2006-2010: Moderate (~80-85%)
+            - 1999-2005: Limited (~60-70%, many missing player IDs)
+            
+            Defensive player attribution is sparse across all seasons (~11.5% of plays).
+        """
+        # Validate seasons if provided
+        if seasons is not None and seasons is not True:
+            valid_seasons, invalid_seasons = self.validate_seasons(seasons)
+            
+            if invalid_seasons:
+                raise SeasonNotAvailableError(
+                    f"The following seasons are not available: {invalid_seasons}. "
+                    f"Play-by-play data is only available from {EARLIEST_SEASON_AVAILABLE} to {LATEST_SEASON_AVAILABLE}."
+                )
+        
+        # Load play-by-play data
+        try:
+            pbp = load_pbp(seasons=self._prepare_season_param(seasons))
+        except ConnectionError as e:
+            raise SeasonNotAvailableError(
+                f"Failed to download play-by-play data. {str(e)}"
+            ) from e
+        
+        # Filter to plays where this player was involved
+        # Check all possible player ID columns
+        player_id = self.profile.gsis_id
+        
+        # Build filter for all player involvement columns
+        player_filters = [
+            # Offensive players
+            pl.col("passer_player_id") == player_id,
+            pl.col("rusher_player_id") == player_id,
+            pl.col("receiver_player_id") == player_id,
+            pl.col("lateral_receiver_player_id") == player_id,
+            
+            # Defensive players - tackles
+            pl.col("solo_tackle_1_player_id") == player_id,
+            pl.col("solo_tackle_2_player_id") == player_id,
+            pl.col("assist_tackle_1_player_id") == player_id,
+            pl.col("assist_tackle_2_player_id") == player_id,
+            pl.col("assist_tackle_3_player_id") == player_id,
+            pl.col("assist_tackle_4_player_id") == player_id,
+            pl.col("tackle_with_assist_1_player_id") == player_id,
+            pl.col("tackle_with_assist_2_player_id") == player_id,
+            pl.col("pass_defense_1_player_id") == player_id,
+            pl.col("pass_defense_2_player_id") == player_id,
+            pl.col("interception_player_id") == player_id,
+            pl.col("sack_player_id") == player_id,
+            pl.col("half_sack_1_player_id") == player_id,
+            pl.col("half_sack_2_player_id") == player_id,
+            
+            # Fumble plays
+            pl.col("fumbled_1_player_id") == player_id,
+            pl.col("fumbled_2_player_id") == player_id,
+            pl.col("fumble_recovery_1_player_id") == player_id,
+            pl.col("fumble_recovery_2_player_id") == player_id,
+            pl.col("forced_fumble_player_1_player_id") == player_id,
+            pl.col("forced_fumble_player_2_player_id") == player_id,
+            
+            # Special teams
+            pl.col("kicker_player_id") == player_id,
+            pl.col("punter_player_id") == player_id,
+            pl.col("kickoff_returner_player_id") == player_id,
+            pl.col("punt_returner_player_id") == player_id,
+            
+            # Penalties
+            pl.col("penalty_player_id") == player_id,
+        ]
+        
+        # Combine all filters with OR
+        player_plays = pbp.filter(pl.any_horizontal(player_filters))
+        
+        # Cache the result
+        self._cache["pbp"] = player_plays
+        
+        logger.info(
+            f"Loaded {player_plays.height} plays for {self.profile.full_name} "
+            f"across {player_plays['season'].n_unique()} season(s)"
+        )
+        
+        return player_plays
+
+    def cached_pbp(self) -> Optional[pl.DataFrame]:
+        """Return cached play-by-play data if it has been fetched previously."""
+        return self._cache.get("pbp")
+
+    def fetch_coverage_stats(
+        self,
+        *,
+        seasons: Union[None, bool, Iterable[int]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Extract partial coverage stats from play-by-play data (DEFENSIVE PLAYERS ONLY).
+        
+        ⚠️ **IMPORTANT LIMITATION**: This data is INCOMPLETE.
+        
+        The nflverse play-by-play data only includes defender attribution on ~11.5% of pass
+        plays (typically when the defender made a specific play like a pass breakup or
+        interception). This is NOT comprehensive coverage tracking.
+        
+        For complete coverage stats (times targeted, completion % allowed, etc.), you
+        would need:
+        - Pro Football Focus (PFF) subscription data
+        - Sports Info Solutions data
+        - Manual film charting
+        
+        This method provides whatever limited data IS available, which can serve as a
+        rough proxy for defensive involvement, but should NOT be interpreted as complete
+        coverage statistics.
+        
+        Args:
+            seasons: Season(s) to analyze. If None, uses current season. If True, all seasons.
+        
+        Returns:
+            Dictionary with partial coverage stats:
+            - plays_credited: # of plays where defender was identified (NOT total targets)
+            - completions_allowed: Completions on those plays
+            - yards_allowed: Yards on those plays
+            - tds_allowed: TDs on those plays
+            - interceptions: INTs by this defender
+            - pass_breakups: Estimated from incomplete passes
+            - note: Warning about data limitations
+        
+        Example:
+            >>> cb = Player(name="Trevon Diggs", position="CB")
+            >>> coverage = cb.fetch_coverage_stats(seasons=[2023])
+            >>> print(coverage['plays_credited'])  # NOT comprehensive target count
+            >>> print(coverage['note'])  # Read the limitations!
+        """
+        if not self.is_defensive():
+            logger.warning(
+                f"{self.profile.full_name} is not a defensive player (position: {self.profile.position}). "
+                "Coverage stats are only relevant for defensive players."
+            )
+        
+        # Validate and prepare seasons
+        if seasons is not None and seasons is not True:
+            valid_seasons, invalid_seasons = self.validate_seasons(seasons)
+            if invalid_seasons:
+                raise SeasonNotAvailableError(
+                    f"The following seasons are not available: {invalid_seasons}. "
+                    f"Play-by-play data is only available from {EARLIEST_SEASON_AVAILABLE} to {LATEST_SEASON_AVAILABLE}."
+                )
+        
+        # Load play-by-play data
+        try:
+            pbp = load_pbp(seasons=self._prepare_season_param(seasons))
+        except ConnectionError as e:
+            raise SeasonNotAvailableError(
+                f"Failed to download play-by-play data. {str(e)}"
+            ) from e
+        
+        # Filter to pass plays where this player was credited as defender
+        player_id = self.profile.gsis_id
+        coverage_plays = pbp.filter(
+            (pl.col("pass_defense_1_player_id") == player_id) |
+            (pl.col("pass_defense_2_player_id") == player_id)
+        )
+        
+        if coverage_plays.height == 0:
+            return {
+                "plays_credited": 0,
+                "completions_allowed": 0,
+                "yards_allowed": 0,
+                "tds_allowed": 0,
+                "interceptions": 0,
+                "pass_breakups": 0,
+                "note": (
+                    "⚠️ WARNING: No plays found with defender attribution. "
+                    "This does NOT mean the player had no coverage snaps. "
+                    "NFLverse PBP data only tracks defenders on ~11.5% of pass plays "
+                    "(plays with defensive events like breakups/INTs). "
+                    "For comprehensive coverage stats, use Pro Football Focus or manual charting."
+                )
+            }
+        
+        # Calculate available stats from the limited data
+        plays_credited = coverage_plays.height
+        
+        completions = coverage_plays.filter(pl.col("complete_pass") == 1).height
+        yards = coverage_plays.select(pl.col("yards_gained").fill_null(0).sum()).item()
+        tds = coverage_plays.filter(pl.col("pass_touchdown") == 1).height
+        ints = coverage_plays.filter(pl.col("interception") == 1).height
+        
+        # Pass breakups = incomplete passes that weren't INTs
+        breakups = coverage_plays.filter(
+            (pl.col("incomplete_pass") == 1) & 
+            (pl.col("interception") == 0)
+        ).height
+        
+        return {
+            "plays_credited": plays_credited,
+            "completions_allowed": completions,
+            "yards_allowed": float(yards) if yards else 0.0,
+            "tds_allowed": tds,
+            "interceptions": ints,
+            "pass_breakups": breakups,
+            "note": (
+                f"⚠️ WARNING: This data is INCOMPLETE. "
+                f"Only {plays_credited} plays found where defender was credited. "
+                f"NFL PBP data only tracks defenders on ~11.5% of pass plays. "
+                f"This is NOT a complete target count. "
+                f"For comprehensive coverage stats (times targeted, completion % allowed, etc.), "
+                f"you need Pro Football Focus or Sports Info Solutions data."
+            )
+        }
 
     def is_defensive(self) -> bool:
         """Check if the player is a defensive player based on position."""

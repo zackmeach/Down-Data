@@ -223,7 +223,7 @@ def main() -> None:
         
         # Offer to generate master stats table (outside of stats fetching block so always available)
         if Confirm.ask("Generate master stats table and save to CSV?", default=False):
-            console.print(f"[dim]This will create a comprehensive table with all available stats and save to 'player_master_stats.csv'[/dim]")
+            console.print(f"[dim]This will create a comprehensive table with all available stats and save to 'data/exports/player_master_stats.csv'[/dim]")
             
             # Ask which seasons to include
             master_seasons_raw = Prompt.ask(
@@ -257,8 +257,8 @@ def main() -> None:
                 if master_table.empty:
                     console.print("[yellow]No stats available to generate master table.[/yellow]")
                 else:
-                    # Save to CSV
-                    output_file = "player_master_stats.csv"
+                    # Save to CSV in exports directory
+                    output_file = "data/exports/player_master_stats.csv"
                     master_table.to_csv(output_file, index=False)
                     
                     console.print(f"\n[green]✓ Master stats table saved to '{output_file}'[/green]")
