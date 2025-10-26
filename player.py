@@ -456,25 +456,15 @@ class Player:
 
     @staticmethod
     def validate_seasons(seasons: Optional[Iterable[int]] = None) -> tuple[List[int], List[int]]:
-        """
-        Validate requested seasons against available data.
-        
-        Args:
-            seasons: Iterable of season years to validate.
-        
-        Returns:
-            Tuple of (valid_seasons, invalid_seasons)
-        """
+        """Split requested seasons into valid and invalid collections."""
+
         if seasons is None:
             return ([], [])
-        
-        valid, invalid = [], []
-        for season in seasons:
-            if EARLIEST_SEASON_AVAILABLE <= season <= LATEST_SEASON_AVAILABLE:
-                valid.append(season)
-            else:
-                invalid.append(season)
-        
+
+        season_list = list(seasons)
+        valid = [season for season in season_list if EARLIEST_SEASON_AVAILABLE <= season <= LATEST_SEASON_AVAILABLE]
+        valid_set = set(valid)
+        invalid = [season for season in season_list if season not in valid_set]
         return (valid, invalid)
     
     @staticmethod
@@ -1095,18 +1085,15 @@ class Player:
         Returns:
             "passing", "rushing", or "receiving"
         """
-        position = self.profile.position
-        if position:
-            pos_upper = position.upper()
-            if pos_upper == "QB":
-                return "passing"
-            elif pos_upper in {"RB", "FB"}:
-                return "rushing"
-            elif pos_upper in {"WR", "TE"}:
-                return "receiving"
-        
-        # Default to passing for unclear positions
-        return "passing"
+        position = (self.profile.position or "").upper()
+        mapping = {
+            "QB": "passing",
+            "RB": "rushing",
+            "FB": "rushing",
+            "WR": "receiving",
+            "TE": "receiving",
+        }
+        return mapping.get(position, "passing")
 
     @staticmethod
     def _build_aggregation_exprs(df: pl.DataFrame, exclude_cols: set[str]) -> List[pl.Expr]:

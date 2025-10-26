@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Sequence
+
+import polars as pl
 
 from rich.console import Console
 from rich.panel import Panel
@@ -38,86 +40,102 @@ def ask_optional_str(message: str) -> Optional[str]:
 
 
 def parse_seasons(raw: str) -> List[int]:
+    """Parse a comma-separated string of seasons into a de-duplicated list."""
+
     seasons: List[int] = []
-    for chunk in raw.split(","):
-        chunk = chunk.strip()
+    seen: set[int] = set()
+    for chunk in (part.strip() for part in raw.split(",")):
         if not chunk:
             continue
         try:
-            seasons.append(int(chunk))
+            season = int(chunk)
         except ValueError:
             console.print(f"[yellow]Ignoring invalid season entry: {chunk}[/yellow]")
+            continue
+        if season not in seen:
+            seasons.append(season)
+            seen.add(season)
     return seasons
 
 
-def build_stats_table(player: Player, seasons: Iterable[int], stats_columns: Optional[List[str]] = None) -> Table:
-    stats = player.fetch_stats(seasons=seasons)
-    console.print(f"Loaded {stats.height} rows of stats for {player.profile.full_name}.")
-    preview = stats.head(5)
-    
-    # Use position-aware columns if not explicitly provided
-    if stats_columns is None:
-        columns = player.get_relevant_stat_columns()
-    else:
-        columns = stats_columns
-    
-    available_columns = [col for col in columns if col in preview.columns]
+def _render_preview_table(
+    *,
+    title: str,
+    preview_rows: pl.DataFrame,
+    candidate_columns: Sequence[str],
+    empty_message: str,
+    missing_columns_message: str,
+) -> Table:
+    """Create a Rich table preview for a stats dataset."""
 
-    table = Table(title=f"Stat preview for seasons {', '.join(str(s) for s in seasons)}")
+    table = Table(title=title)
+
+    available_columns = [column for column in candidate_columns if column in preview_rows.columns]
+
     if not available_columns:
         table.add_column("message")
-        table.add_row("No preview columns are available for the returned dataset.")
+        table.add_row(missing_columns_message)
         return table
 
     for column in available_columns:
-        table.add_column(column)
+        table.add_column(column, overflow="fold")
 
-    for row in preview.iter_rows(named=True):
-        table.add_row(*[str(row.get(column, "")) for column in available_columns])
+    if preview_rows.height == 0:
+        table.add_row(empty_message, *([""] * (len(available_columns) - 1)))
+        return table
 
-    if preview.height == 0:
-        table.add_row(*(["No stats returned for the selected seasons."] + [""] * (len(available_columns) - 1)))
+    for row in preview_rows.iter_rows(named=True):
+        table.add_row(*(str(row.get(column, "")) for column in available_columns))
+
     return table
+
+
+def build_stats_table(
+    player: Player, seasons: Iterable[int], stats_columns: Optional[List[str]] = None
+) -> Table:
+    seasons_list = list(seasons)
+    season_label = ", ".join(str(season) for season in seasons_list) or "all requested seasons"
+    stats = player.fetch_stats(seasons=seasons_list)
+    console.print(f"Loaded {stats.height} rows of stats for {player.profile.full_name}.")
+    preview = stats.head(5)
+
+    columns = stats_columns or player.get_relevant_stat_columns()
+
+    return _render_preview_table(
+        title=f"Stat preview for seasons {season_label}",
+        preview_rows=preview,
+        candidate_columns=columns,
+        empty_message="No stats returned for the selected seasons.",
+        missing_columns_message="No preview columns are available for the returned dataset.",
+    )
 
 
 def build_nextgen_stats_table(
     player: Player, seasons: Iterable[int], stat_type: Optional[str] = None
 ) -> Table:
     """Build a table showing NextGen advanced stats."""
-    if stat_type is None:
-        stat_type = player.get_nextgen_stat_type()
-    
+    seasons_list = list(seasons)
+    season_label = ", ".join(str(season) for season in seasons_list) or "all requested seasons"
+    stat_type = stat_type or player.get_nextgen_stat_type()
+
     console.print(f"Loading NextGen {stat_type} stats...")
-    nextgen_stats = player.fetch_nextgen_stats(seasons=seasons, stat_type=stat_type)
+    nextgen_stats = player.fetch_nextgen_stats(seasons=seasons_list, stat_type=stat_type)
     console.print(f"Loaded {nextgen_stats.height} rows of NextGen stats.")
-    
-    preview = nextgen_stats.head(5)
-    columns = player.get_relevant_nextgen_columns(stat_type)
-    available_columns = [col for col in columns if col in preview.columns]
-    
+
     stat_type_names = {
         "passing": "Passing",
-        "rushing": "Rushing", 
+        "rushing": "Rushing",
         "receiving": "Receiving",
     }
-    title = f"NextGen {stat_type_names.get(stat_type, stat_type)} Stats - {', '.join(str(s) for s in seasons)}"
-    table = Table(title=title)
-    
-    if not available_columns:
-        table.add_column("message")
-        table.add_row("No preview columns available.")
-        return table
-    
-    for column in available_columns:
-        table.add_column(column, overflow="fold")
-    
-    for row in preview.iter_rows(named=True):
-        table.add_row(*[str(row.get(column, "")) for column in available_columns])
-    
-    if preview.height == 0:
-        table.add_row(*(["No stats returned."] + [""] * (len(available_columns) - 1)))
-    
-    return table
+    title = f"NextGen {stat_type_names.get(stat_type, stat_type)} Stats - {season_label}"
+
+    return _render_preview_table(
+        title=title,
+        preview_rows=nextgen_stats.head(5),
+        candidate_columns=player.get_relevant_nextgen_columns(stat_type),
+        empty_message="No stats returned.",
+        missing_columns_message="No preview columns available.",
+    )
 
 
 def main() -> None:

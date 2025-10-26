@@ -6,7 +6,8 @@ This project provides an extendable `Player` object powered by [`nflreadpy`](htt
 terminal application (`main.py`) that lets you explore player metadata interactively. The constructor supports disambiguating players
 with the same name by optionally supplying team, draft year, draft team, or position filters and chooses the most notable match when
 multiple candidates remain. Once instantiated, the `Player` keeps key identifiers and biographical details in memory and exposes an
-entry point for loading nflverse stats on demand.
+entry point for loading nflverse stats on demand. The CLI now deduplicates season inputs, reuses a shared preview table renderer, and
+surfaces clearer guidance when no preview columns or rows are available.
 
 ## Dependencies
 
@@ -75,8 +76,9 @@ stats = player.fetch_stats(seasons=[1999, 2000])  # Works if player was active
   - `fetch_coverage_stats()` extracts partial coverage data from play-by-play for defensive players (limited - see COVERAGE_STATS_RESEARCH.md)
   - Position-aware helpers: `is_defensive()`, `get_relevant_stat_columns()`, `get_nextgen_stat_type()` automatically detect appropriate stat types
 * **Rich-powered CLI** – `main.py` builds an interactive prompt with Rich panels, prompts, and tables. It guides you through player
-  lookup, displays the stored profile, and optionally previews per-season stats (first five rows) for the seasons you enter. The CLI
-  showcases the `Player` API but is intentionally thin so future commands or visualisations can plug in easily.
+  lookup, displays the stored profile, and optionally previews per-season stats (first five rows) for the seasons you enter. The
+  preview builder now guarantees consistent table formatting across basic and NextGen stats (including graceful handling of empty
+  datasets) while keeping the CLI intentionally thin so future commands or visualisations can plug in easily.
 
 ## Running the demo
 
