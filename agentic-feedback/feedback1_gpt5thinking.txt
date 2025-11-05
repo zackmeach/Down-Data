@@ -1,0 +1,207 @@
+ootp26_nfl_ui_plan.txt
+======================
+
+0) Purpose of this doc
+----------------------
+You want to recreate the Out of the Park Baseball 26 (OOTP26) visual language, but for *real-life NFL data* that you can pull on demand (preferably via nflverse/nflreadpy). This doc walks through what we saw in the screenshots and turns it into: (1) a first screen to build (“Find a Player”), (2) how to structure a PySide/PyQt app so it stays simple, (3) how to map OOTP26’s baseball pages to NFL equivalents, and (4) a small style guide so you can “speak UI” to an agent.
+
+Everything below is intentionally spelled out so you can build it in layers instead of trying to ship the whole game UI at once.
+
+
+1) Start screen: “Find a Player”
+--------------------------------
+You said you want this to be the first thing for now, which is perfect, because every other screen in OOTP is “a detail page for an entity.” So the first thing we build is the thing that *finds entities*.
+
+### 1.1 What the OOTP screen is doing
+Your last screenshot (the dark screen with “MLB Transactions” and a big empty results area) is basically:
+
+- A **filter panel** on the left (age, contract years left, ratings, stats, league, “include minor leaguers”).
+- A **search button** in the middle.
+- A **results grid** on the right that fills with players.
+
+We can lift that shape 1:1.
+
+### 1.2 NFL version of that layout
+Left panel (filters):
+- Text box: “Player name (partial ok)”
+- Combo: “Team” (drop-down of NFL abbreviations)
+- Combo: “Position / position group” (QB, RB, WR, TE, OL, DL, EDGE, LB, CB, S, ST)
+- Year range / season: “Active in season …” (because your data starts 1999+)
+- Checkbox: “Only currently active”
+- Button: “Search”
+
+Right panel (results):
+- QTableView listing players (Name, Team, Pos, Draft Yr, GSIS ID)
+- Double-click or select → “Open Player”
+
+This is enough to prove the data path.
+
+### 1.3 How to wire data for this screen
+You already have a `Player` abstraction that knows how to resolve a name, normalize teams, and fetch stats. That file already caches the combined nflverse player table in memory so you don’t have to download every time. Reuse that. Fetch the player list once → filter in memory afterward. (In other words, don’t download player data every time you type a letter.) :contentReference[oaicite:0]{index=0}
+
+Because you said “limit local storage,” the rule can be:
+- On app start: load players table once (this is what your code already does).
+- Keep it in a module-level cache / singleton object.
+- All searches just filter that in-memory Polars/Pandas table.
+- Only when the user opens a player do you call the heavier stuff (`fetch_stats`, `fetch_pbp`, `fetch_nextgen_stats`).
+
+### 1.4 PySide/PyQt pieces for this screen
+- Main window: `QMainWindow`
+- Central widget: `QSplitter` (horizontal)
+    - Left: `QWidget` with `QFormLayout` (for filters) + `QPushButton("Search")`
+    - Right: `QTableView` backed by a custom `QAbstractTableModel` (or `QStandardItemModel` while you’re learning)
+- On “Search” → run a function that filters the cached player dataframe and pushes rows into the table model.
+
+Keep this as dumb as possible: one file called `find_player_page.py` that exports a `FindPlayerPage(QWidget)` you can drop into the main window.
+
+
+2) Shell layout for the *player* pages
+--------------------------------------
+All the other screenshots you sent (Accomplishments, Contract, Injury History, Summary, Game Logs, Career Stats, Streaks) follow exactly the same frame:
+
+- A **header strip** at the top with player photo, name, team, age, height/weight, salary, and a tab bar.
+- A **tab bar** or segmented control that switches between sub-pages (Profile, Ratings, Batting Stats, Pitching Stats, Fielding Stats, Real Life Stats, History, Editor).
+- A **big content panel** that shows a table or a two-column layout.
+
+So, in Qt terms:
+
+- Top: `QWidget` (horizontal layout) → left (player avatar + labels), right (maybe buttons like “Set to SP” in OOTP → you can skip for now).
+- Under that: `QTabWidget` (this is the analog of all those OOTP tabs).
+- Each tab = a dedicated widget: `ProfileTab`, `ContractTab`, `InjuryHistoryTab`, `StatsTab`, etc.
+
+This is simple to speak to an agent: “I want a QMainWindow → player detail is a QWidget composed of [header + QTabWidget]. Each tab is its own QWidget.”
+
+
+3) Mapping OOTP baseball pages → NFL pages
+------------------------------------------
+Below is how each of your screenshots can map to NFL data you can actually get from nflverse and your `Player` class. (Where the data doesn’t exist in nflverse, I’ll mark it as “stub data”.)
+
+### 3.1 Profile / Summary (your 4th screenshot)
+OOTP shows: basic batting ratings, personality, speed, stealing, player position ratings, and a history grid at the bottom.
+
+NFL equivalent:
+- Left column: biographical + identifiers (full name, birthdate, college, draft round/pick, height/weight, position, team) — you already get these from your player class. :contentReference[oaicite:1]{index=1}
+- Middle column: “Current Season Snapshot”
+    - games_played
+    - team
+    - basic production depending on position (QB: passing yards/TD/INT; RB: rush yards/TD; WR/TE: targets/receptions/rec yards/TD; DEF: tackles/sacks/INT)
+    - You can compute this from `fetch_stats()` filtered to the latest season. :contentReference[oaicite:2]{index=2}
+- Right column: “NextGen / Advanced” (2016+) if available — average separation, time to throw, rush yards over expected — show only if the dataframe isn’t empty.
+- Bottom panel: “Season-by-season summary” → this is almost exactly your `get_master_stats_table()` output: 1 row per season, show year, team, games, key stats. You already wrote that function, so the UI just needs to display its Pandas dataframe in a QTableView. :contentReference[oaicite:3]{index=3}
+
+### 3.2 Contract (your 2nd screenshot)
+OOTP has real contract numbers because it controls the league. For real NFL, nflverse does NOT ship contract data. So:
+- Make this tab a stub for now: show team, years in league, status (active/inactive), and maybe “expected position” (you can infer from position).
+- Add a note at the top: “Contract data requires Spotrac/OTC or manual entry.”
+- If you later add a local JSON/YAML with contract info by `gsis_id`, this tab can read from that without changing UI.
+
+### 3.3 Injury History (your 3rd screenshot)
+OOTP has a perfect injury ledger. NFL public data doesn’t give you a clean per-player injury timeline in nflverse.
+
+Easiest path:
+- Make the tab.
+- Show “Injuries not available from nflverse. You can add a CSV per player in /data/injuries/GSIS_ID.csv and we’ll render it here.”
+- If you *really* want to be clever, you can scan play-by-play (`fetch_pbp()`) for games missed or “inactive” flags and create a “Games Missed” pseudo-table, but that’s phase 2. :contentReference[oaicite:4]{index=4}
+
+### 3.4 History / Accomplishments (your 1st screenshot)
+OOTP shows awards and events. For NFL:
+- You *can* show “career milestones” derived from your stats: first season, best season, total yards, total TDs, total tackles, etc.
+- If you hand-maintain an “awards.json” (MVP, OPOY, DPOY, Pro Bowl), you can render it here too.
+- Structure: left column “Career Summary,” right column “Game Achievements” (your screenshot has that exact two-column split).
+
+### 3.5 Batting Stats → NFL Stats (your 5th and 6th screenshots)
+OOTP game log shows one row per game: date, opponent, AB, R, H, etc.
+
+NFL version:
+- Use `fetch_stats()` at the weekly level (it returns week-by-week rows) → present that in a table with columns:
+    - season, week, team, opponent_team, then position-specific stats
+- Let the user filter at the top: “View: All seasons / 2024 / 2023”
+- You can also add “Show playoffs” toggle, because your Player object already has a flag for season_type. :contentReference[oaicite:5]{index=5}
+
+Career stats (the other baseball screen) is already basically what your `get_master_stats_table()` gives back: 1 row per season with aggregates. So this tab is nearly free. :contentReference[oaicite:6]{index=6}
+
+### 3.6 Streaks (your 7th screenshot)
+NFL doesn’t really have “15-game hitting streak,” but you can fake useful football streaks out of the week-by-week stats:
+- “Consecutive games with a reception”
+- “Consecutive games with 50+ rush yards”
+- “Consecutive games with a pass TD”
+That’s all derivable from the weekly table you already pull — just run a small Python function to compute streaks for the current season and show them in a QTableView. (You don’t have to do every streak type now; just make the table and add 1-2 streaks so the tab exists.)
+
+
+4) Data layer plan (keep downloads small)
+-----------------------------------------
+You said you don’t want to blow up your computer with local storage. The good news: your current `player.py` already does what we want — it lazily loads/caches the big tables and then filters in memory. So the UI should sit *on top* of exactly that behavior. :contentReference[oaicite:7]{index=7}
+
+**Rules to follow:**
+1. **Singleton data source** – make a tiny module `data_source.py` with a function `get_players_df()` that just calls your existing caching code. All UI pages import from there.
+2. **Per-player cache** – when the user opens a player detail page, create one `Player` instance and hold onto it for that tab so you don’t re-download stats every time you change sub-tabs.
+3. **Lazy tabs** – only fetch heavy data when the tab is *shown*. In PySide/PyQt you can connect `currentChanged` on the `QTabWidget` to a slot that says “if this tab has not loaded, load it now.”
+4. **No auto-save to disk** – stay in memory unless the user clicks “Export to CSV.” At that moment you write to disk.
+
+
+5) Style guide (to talk to an agent)
+------------------------------------
+Here’s the vocabulary and design tokens you can hand to an agent so it knows what you mean.
+
+### 5.1 Colors (OOTP-like dark desktop app)
+- App background: `#101218` or `#121212`
+- Primary panel background: `#1C1F26`
+- Secondary panel/background (tables): `#252932`
+- Panel border: `#3A3F4A`
+- Accent / selected row: `#2F6DB2` (blue) or your usual `#374151`
+- Text primary: `#E5E7EB`
+- Text secondary / label: `#9CA3AF`
+- Error / missing data: `#F87171`
+
+### 5.2 Shapes
+- Everything is **rectangular** with 2–4px radius.
+- Panels should have 1px border, slightly lighter than background.
+- Use **splitters** instead of floating windows to match OOTP’s single desktop-style canvas.
+
+### 5.3 Fonts
+- Use system default (on Windows it’ll be Segoe UI) at 9–10pt for tables.
+- Headers 12–14pt, bold.
+
+### 5.4 Terms to use
+- “Header strip” – the top area with player photo/name/team.
+- “Sidebar” – the left filter column in Find Player.
+- “Content panel” – the main area on the right.
+- “Tab bar” / “QTabWidget” – the thing that switches between Profile/Stats/History.
+- “Table view” – QTableView bound to a model.
+- “Detail pane” – any right-side panel that shows a selected player’s metadata.
+- “Primary action” – buttons like “Search,” “Open Player,” “Export.”
+Using these terms will make it easier to prompt an agent to “create a QTabWidget-based content panel with a header strip.”
+
+### 5.5 Interaction rules
+- Tables are the default view.
+- Double-click = open.
+- Filters should have labels on the left, controls on the right (QFormLayout).
+- Always show a status bar message like “Loaded 1,846 players in 120 ms” at the bottom — it makes the app feel real.
+
+
+6) Suggested project structure
+------------------------------
+Keep it small and obvious:
+
+- `main.py` – creates QMainWindow, adds FindPlayerPage as central widget
+- `ui/find_player_page.py` – the screen we just described
+- `ui/player_detail.py` – header + tab widget
+- `ui/tabs/profile_tab.py`
+- `ui/tabs/stats_tab.py`
+- `ui/tabs/history_tab.py`
+- `data/player_facade.py` – thin wrapper around your existing `Player` class so the UI doesn’t have to know about polars
+- `style.qss` – put your colors and table styles here
+
+This way, if you later say “make it look more like OOTP,” you just adjust `style.qss` and the header widget.
+
+
+7) Next steps (in build order)
+------------------------------
+1. Build `FindPlayerPage` UI with hardcoded dummy rows.
+2. Replace dummy rows with real data from your cached player table. (Use your current code to load players once.) :contentReference[oaicite:8]{index=8}
+3. Add “double-click row → open PlayerDetailWindow”.
+4. In PlayerDetailWindow, make **only** the Summary tab, and populate it with `player.info()` + `get_master_stats_table()` top 5 rows. :contentReference[oaicite:9]{index=9}
+5. Add Stats tab (weekly view) using `fetch_stats()`.
+6. Add stub tabs for Contract, Injury, History so the layout matches the screenshots even if data is missing.
+
+Once you’ve got that, you basically *have* an NFL OOTP-style explorer — you’ll just keep enriching tabs as you find more data sources.

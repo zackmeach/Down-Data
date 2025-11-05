@@ -1,0 +1,354 @@
+ OOTP26-style NFL Desktop App Plan (PySide6)
+ Date: 2025-11-05
+ 
+ Goals (from you)
+ - Start with a "Find A Player" page (as temporary home) to exercise search.
+ - Desktop app with PySide/PyQt, matching the OOTP look/feel.
+ - Minimize local storage; prefer live API data with light caching.
+ - Keep structure simple and beginner-friendly.
+ - Provide detailed style guidance (colors, shapes, naming/terminology) to talk UI like an agent.
+ 
+ Quick Recommendation
+ - Framework: PySide6 (Qt for Python). LGPL, first‑party, modern. PyQt6 is fine too, but PySide6 avoids licensing surprises.
+ - UI building: Qt Designer or Qt Creator for layout; wire up logic in Python.
+ - Data: Provider interface with pluggable backends (e.g., ESPN JSON endpoints, SportsData.io, Sportradar, Pro-Football-Reference scraping, your existing NFLReadPy). Start with one free+stable source and add others later.
+ - Caching: requests-cache (SQLite backend) with per-resource TTL; in-memory LRU for images; zero bulk data dumps by default.
+ - Models: Python dataclasses or Pydantic BaseModel (clear schemas + validation).
+ - Tables: QAbstractTableModel + QTableView with QSortFilterProxyModel for fast filtering/sorting.
+ - Concurrency: QThreadPool + QRunnable workers for API calls; debounce search.
+ 
+ ————————————————————————————————————————————————————————
+ 1) Page-by-Page Blueprints (from provided images)
+ 
+ A. Find A Player (ootp_league_findplayer.png)
+ Layout
+ - Top bar: Global navigation (later), page title, quick filters.
+ - Left pane (Filters): Text search, Position, Team, Season/Year, Status (active/retired), Age range, College, Draft year/round, Misc filter chips.
+ - Center (Results Grid): Players matching filters. Columns: Name, Position, Team, Age, Experience, Height/Weight, College, Status, Primary Stats snippet (season/career summary), IDs hidden.
+ - Right pane (Preview): Mini player card: headshot, name/jersey, team colors, last 5 games or season overview, quick actions (Open Profile).
+ - Bottom status bar: Result count; last updated; API source indicator.
+ 
+ Behavior
+ - Live, debounced search-as-you-type (250–350 ms).
+ - Filter chips togglable; a clear-all button.
+ - Multi-sort via header (shift-click); persistent column widths/order.
+ - Keyboard nav: Up/Down selects row; Enter opens profile; Ctrl+F focuses search.
+ - Double-click row or "Open Profile" to navigate to Player Profile.
+ 
+ Data
+ - Only query summary fields needed for the grid; load details on demand when opening a player.
+ - API call shape: find_players(query, filters, page, page_size) → list + total.
+ - Use paging or infinite scroll (virtualized) to avoid heavy downloads.
+ 
+ Implementation Notes
+ - Use QAbstractTableModel for players; QSortFilterProxyModel for client-side text filter; server filters applied in API.
+ - Keep result set light (e.g., 50–200 rows visible); page controls at the bottom.
+ - Use QCompleter for team/college fields.
+ 
+ B. Player Profile – Summary (ootp_player_profile_summary.png)
+ Layout
+ - Header: Headshot, Name, Jersey #, Primary position(s), Team logo + colors, Current status (Active/IR/PUP), Experience, Age.
+ - Key Badges: Pro Bowl, All-Pro, Championships, Awards displayed as small pill badges.
+ - Vitals: Height, Weight, Handedness (if applicable), College, Draft info (year/round/pick/team).
+ - Season Snapshot: Current season key stats; team record; snap counts.
+ - Navigation tabs: Summary | Contract | Injury History | Stats | Game Log | Streaks | Accomplishments
+ 
+ Behavior
+ - Header color adapts to team colors with readable contrast.
+ - Tab content lazy-loaded; cached per player for session.
+ 
+ C. Contract (ootp_player_profile_contract.png)
+ Layout
+ - Contract Table: Year, Base Salary, Bonuses, Cap Hit, Dead Cap, Guaranteed left, Notes (void yrs, restructures).
+ - Summary cards: Contract total, AAV, Years remaining, Next key dates (cut, option, roster bonus).
+ 
+ Data
+ - If API lacks precise contract details, consider Spotrac/OverTheCap (may require API/subscription) or label the section as "basic contract info" initially: years, team, AAV, status.
+ 
+ D. Injury History (ootp_player_profile_injuryhistory.png)
+ Layout
+ - Table: Date, Injury type/body part, Games missed, Status (Questionable/Out/IR/Return), Source.
+ - Timeline view (optional later): Horizontal timeline with severities.
+ 
+ E. Stats – Season/Career (ootp_player_stats_stats.png)
+ Layout
+ - Tabs or dropdown for stat groups by position: QB, RB, WR/TE, OL (grades/snap counts), DL, LB, DB, ST.
+ - Table with season rows, career totals, team splits, playoffs toggle.
+ - Columns vary by position (e.g., QB: Yds, TD, INT, CMP%, Y/A, EPA/play; RB: Att, Yds, Y/A, TD, YAC; WR/TE: Tgt, Rec, Yds, Y/R, TD; IDP: Tkl, TFL, Sacks, INT, PD, FF).
+ - Season selector: single season or career.
+ 
+ F. Game Log (ootp_player_stats_gamelog.png)
+ Layout
+ - Table: Date, Week, Opponent, Home/Away, Result, Snap %, statline columns per position.
+ - Sub-filters: By date range, versus division, home/away.
+ - Small sparkline of recent games (optional, later).
+ 
+ G. Streaks (ootp_player_stats_streaks.png)
+ Layout
+ - Cards or table listing active/longest streaks (e.g., 5+ receptions, 50+ rush yards, sack in consecutive games).
+ - Compute on the fly from game log (cache results).
+ 
+ H. Accomplishments (ootp_player_history_accomplishments.png)
+ Layout
+ - Timeline or grouped list: Pro Bowl selections, All-Pro teams, Rookie awards, Player-of-the-Week/Month, Records held.
+ - Filter by award type.
+ 
+ ————————————————————————————————————————————————————————
+ 2) Technology & Architecture
+ 
+ Why PySide6
+ - First-party Qt binding, permissive licensing (LGPL), stable API, rich widgets, great performance.
+ - Large ecosystem (Qt Designer, QSS styling, model/view framework).
+ 
+ Project Structure (simple, scalable)
+ app/
+   main.py
+   core/
+     config.py
+     state.py
+     models/
+       player.py
+       team.py
+       stats.py
+     data/
+       providers/
+         base.py          # Provider interface
+         espn.py          # Example provider
+         sportsdata_io.py # Optional
+         nflreadpy.py     # Your adapter
+       cache.py           # requests-cache + helpers
+   ui/
+     main_window.py
+     pages/
+       find_player.py
+       player_profile/
+         summary.py
+         contract.py
+         injuries.py
+         stats.py
+         gamelog.py
+         streaks.py
+         accomplishments.py
+     widgets/
+       player_card.py
+       filter_panel.py
+     styles/
+       palette.qss
+       components.qss
+   assets/
+     icons/
+     logos/
+     fonts/
+ 
+ Core Concepts
+ - Provider Interface (base.py):
+   - find_players(query, filters, page, page_size) -> PlayerSummaryPage
+   - get_player(player_id) -> Player
+   - get_player_stats(player_id, season|career, split) -> StatsFrame
+   - get_game_log(player_id, season) -> GameLogFrame
+   - get_awards(player_id) -> list[Award]
+   - get_contract(player_id) -> Contract or None
+   - get_injuries(player_id) -> list[Injury]
+ - Implement one provider first; add others behind the same interface.
+ - State (state.py): currentSeason, selectedPlayerId, lastSearchQuery, theme.
+ - Models: dataclasses or Pydantic; keep them small and specific to UI needs.
+ 
+ Concurrency
+ - Use QThreadPool + QRunnable for API calls; emit signals to update models.
+ - Debounce text search to avoid flooding network.
+ 
+ ————————————————————————————————————————————————————————
+ 3) Data & API Strategy (minimize local storage)
+ 
+ Provider Options
+ - ESPN public JSON (unofficial): Rich player, team, schedule, and headshots. Stable enough, but TOS is unofficial—use responsibly.
+ - SportsData.io (paid/free tier): Solid coverage, official API contracts.
+ - Sportradar (paid): Enterprise-grade.
+ - MySportsFeeds (paid): Reasonable coverage.
+ - Pro-Football-Reference (scrape or sportsipy): Broad historical, but scraping can be brittle.
+ - Your NFLReadPy: If it already aggregates, wrap it to match the provider interface.
+ 
+ Approach
+ - Start with one source that meets MVP needs (players search + basic profile + season stats + game logs). ESPN endpoints or SportsData.io are good starts.
+ - Add a thin adapter for NFLReadPy to reuse your experiments.
+ 
+ Caching
+ - Use requests-cache with SQLite backend (e.g., ./.cache/http_cache.sqlite).
+ - TTLs by resource:
+   - Players search: 6 hours
+   - Player profile/vitals: 24 hours
+   - Game logs (in-season): 2 hours; off-season: 7 days
+   - Contract: 30 days (or until season change)
+   - Injuries (in-season): 1–4 hours; off-season: 7 days
+   - Awards/accomplishments: 30 days
+ - Image caching: in-memory LRU for active session + on-disk small thumbnails (cap ~100 MB, evict LRU).
+ 
+ Data Volume Control
+ - Fetch minimal columns for search grid.
+ - Load heavy data lazily when opening tabs.
+ - Paginate long lists; virtualize tables; avoid entire-career bulk pulls unless requested.
+ 
+ ————————————————————————————————————————————————————————
+ 4) UI Styling & Terminology (to speak the language)
+ 
+ Key Qt Widgets/Concepts
+ - QMainWindow, QToolBar, QStatusBar
+ - QDockWidget (optional side panels), QSplitter (resizable panes)
+ - QStackedWidget (page switching), QTabWidget (tabs within profile)
+ - QTableView (data grid) with QAbstractTableModel (backing model)
+ - QSortFilterProxyModel (filter/sort), QCompleter (auto-complete)
+ - QListView/QTreeView (lists), QGroupBox (grouped filters), QFormLayout
+ - QStyledItemDelegate (custom cell rendering)
+ 
+ Visual Style (OOTP-like)
+ - Overall: Dark theme, high-contrast headers, flat panels with slight depth.
+ - Palette (suggested hex):
+   - Background: #101215 (base), #161A1E (elevated), #1E242B (panels)
+   - Primary accent: #00B894 (teal) or #2ECC71 (green)
+   - Secondary accent: #F1C40F (gold) for highlights/badges
+   - Text: #ECEFF4 (primary), #B0BAC5 (secondary), #7B8794 (muted)
+   - Borders/Dividers: #2B3138
+   - Success/Info/Warning/Error: #2ECC71 / #3498DB / #F39C12 / #E74C3C
+ - Typography: "Inter", "Roboto", or "Noto Sans"; condensed variant for tables ("Roboto Condensed").
+ - Spacing: 8‑point system (4/8/16/24/32 px). Keep grids dense but readable.
+ - Corners: 4 px radius for cards/inputs; tables squared.
+ - Elevation: Subtle shadow only for modals/menus.
+ - Tables: Zebra rows (#171B20 / #1B2026), hover row highlight (#24303A), selected row border/accent left strip.
+ - Focus: Visible focus ring with accent color.
+ 
+ Naming/Terminology
+ - Primary Navigation, Secondary Navigation
+ - Filter Panel, Filter Chips
+ - Data Grid, Header Row, Frozen Column
+ - Detail Pane, Info Card
+ - Badge, Pill, Chip
+ - Splitter, Dock, Stack
+ - Breadcrumbs, Tab Bar, Toolbar
+ 
+ QSS Theming Tips
+ - Centralize palette tokens in palette.qss; import into components.qss.
+ - Style QTableView::item { padding: 6px; } and header sections with bold text.
+ - Use objectName (setObjectName) to target specific widgets in QSS.
+ 
+ ————————————————————————————————————————————————————————
+ 5) Interaction Patterns (UX)
+ 
+ Search
+ - Debounced input; show loading indicator in the grid area; keep previous results until new ones arrive.
+ - Remember last filters per session.
+ 
+ Tables
+ - Header sorting; multi-sort with Shift; context menu for column visibility.
+ - Double-click row → open profile; Enter key triggers default action.
+ 
+ Navigation
+ - Main window hosts a QStackedWidget of pages; a top toolbar or left nav for switching.
+ - From Find Player, open profile in the same window, with Back action returning to results (preserve scroll position and selection).
+ 
+ Responsiveness
+ - Always do network calls off the GUI thread; disable controls while busy; optimistic UI for small actions.
+ 
+ ————————————————————————————————————————————————————————
+ 6) Minimal Data Models (example)
+ 
+ PlayerSummary (for search grid)
+ - playerId: str
+ - fullName: str
+ - position: str
+ - teamAbbr: str | None
+ - age: int | None
+ - experienceYears: int | None
+ - college: str | None
+ 
+ Player (profile)
+ - ...all above +
+ - jerseyNumber: str | None
+ - heightInches: int | None
+ - weightLbs: int | None
+ - draft: { year:int, round:int|None, pick:int|None, teamAbbr:str|None }
+ - headshotUrl: str | None
+ 
+ Stat lines are position-specific; model them per group (QBStats, RBStats, ReceiverStats, IDPStats).
+ 
+ ————————————————————————————————————————————————————————
+ 7) Example Interfaces and Snippets (reference)
+ 
+ Provider interface (Python)
+ class Provider(Protocol):
+     def find_players(self, query: str, filters: dict, page: int, page_size: int) -> PlayerSummaryPage: ...
+     def get_player(self, player_id: str) -> Player: ...
+     def get_player_stats(self, player_id: str, season: int | None, split: str) -> StatsFrame: ...
+     def get_game_log(self, player_id: str, season: int) -> GameLogFrame: ...
+     def get_contract(self, player_id: str) -> Contract | None: ...
+     def get_injuries(self, player_id: str) -> list[Injury]: ...
+     def get_awards(self, player_id: str) -> list[Award]: ...
+ 
+ Players table model (high level)
+ - Subclass QAbstractTableModel; keep an internal list[PlayerSummary].
+ - Implement rowCount, columnCount, data, headerData, sort.
+ - Expose roles: DisplayRole, DecorationRole (team logo), UserRole (playerId).
+ 
+ Debounced search flow
+ - QLineEdit textChanged → QTimer single-shot 300 ms → dispatch worker to provider.find_players → on result, model.setRows(...).
+ 
+ requests-cache setup
+ from requests_cache import CachedSession
+ session = CachedSession(
+     'http_cache',
+     backend='sqlite',
+     expire_after={'default': 86400, 'players': 6*3600, 'gamelog': 2*3600},
+ )
+ 
+ ————————————————————————————————————————————————————————
+ 8) MVP Milestones (practical path)
+ 
+ Phase 0 – Setup (0.5–1 day)
+ - PySide6, requests, requests-cache, pydantic (optional), httpx (optional), python-dotenv.
+ - Project skeleton, dark theme QSS, empty pages.
+ 
+ Phase 1 – Find A Player (1–2 days)
+ - Filters + debounced search; provider adapter; results grid; preview pane; open profile.
+ 
+ Phase 2 – Player Profile: Summary (1 day)
+ - Header with team colors, vitals, badges placeholder.
+ 
+ Phase 3 – Stats + Game Log (2–3 days)
+ - Season/career tables per position; game log table; basic streaks.
+ 
+ Phase 4 – Injuries + Accomplishments (1–2 days)
+ - Tables with filters; timeline optional.
+ 
+ Phase 5 – Contract (1–2 days)
+ - Basic info; enhance with paid API later if desired.
+ 
+ ————————————————————————————————————————————————————————
+ 9) Performance & Quality Tips
+ - Use model/view; avoid building large QWidget trees inside cells—use delegates instead.
+ - Freeze first column (name) with two synced QTableViews if needed.
+ - Avoid Python loops in paint paths; preformat text and icons.
+ - Batch UI updates: beginResetModel/endResetModel or layoutChanged where appropriate.
+ - Persist user column layouts in QSettings.
+ 
+ ————————————————————————————————————————————————————————
+ 10) Risks & Mitigations
+ - Data source volatility: Abstract behind Provider; add multiple backends.
+ - Rate limits: Debounce, cache, and backoff; surface friendly errors.
+ - Contract data availability: Start minimal; integrate paid provider later.
+ - Long tables: Virtualize and page; lazy-load.
+ 
+ ————————————————————————————————————————————————————————
+ 11) Asset Sourcing (minimal storage)
+ - Headshots: ESPN/NFL static CDNs; cache thumbnails locally (cap size with eviction).
+ - Team logos/colors: Ship a small JSON mapping and SVGs (32–64 px); or fetch on demand and cache.
+ - Fonts: Bundle one variable font (e.g., Inter Variable) for consistent look.
+ 
+ ————————————————————————————————————————————————————————
+ 12) What to Build First (summary checklist)
+ - PySide6 app skeleton with dark QSS and main window.
+ - Find A Player page: filters panel, QTableView, debounced search, open profile.
+ - Provider adapter (pick one source) with requests-cache.
+ - Player profile summary tab with header + vitals.
+ - Season stats + game log tables for one position (e.g., WR) as a template.
+ 
+ This plan keeps your machine light (API-first + caching), matches OOTP’s UI style, and stays approachable with PySide6’s designer-friendly workflow.
+

@@ -1,0 +1,147 @@
+Recreating OOTP26 UI for NFL - Design and Implementation Guide.txt
+
+Overview
+--------
+This guide provides a step-by-step plan to recreate the OOTP26 (Out of the Park Baseball) user interface style for real-life NFL players, stats, teams, and league years. We'll adapt the baseball-specific elements to NFL equivalents (e.g., batting stats become passing/rushing/receiving/defense stats, positions like SP become QB/RB/WR/etc.). The app will start with a 'Find A Player' screen as the main page for now, with player details opening in tabs or a new window/section upon selection.
+
+We'll use PySide6 (Qt for Python) for the UI because it's officially supported by Qt, offers excellent performance and flexibility, and is very similar to PyQt6 but with a more permissive license. It's fast for complex UIs and supports custom styling to match OOTP's dark theme.
+
+Key Principles:
+- Minimize local storage: Use nflreadpy to fetch data on-demand from nflverse APIs. Cache only in-memory during the session if needed for performance.
+- Simple structure: Modular classes for screens, reusable widgets, and clear separation of UI and data logic.
+- Novice-friendly: Start with basic Qt concepts, build incrementally. Use Qt Designer for initial layouts if you want a visual tool (install via pip install pyqt6-tools, but we'll describe code-based setup).
+- Styling: Dark mode with black/gray backgrounds, white/light gray text, green accents for buttons, blue for tabs/headers – closely matching the screenshots.
+
+UI Terminology Glossary
+-----------------------
+To help you communicate effectively:
+- QWidget: Base class for all UI elements (like a generic container).
+- QMainWindow: Top-level window with menu bar, status bar, and central widget.
+- QTabWidget: Container for tabbed pages (e.g., Profile, Ratings, Stats tabs in player view).
+- QSplitter: Divides the window into resizable sections (e.g., left sidebar filters + right results in Find Player).
+- QTableView/QTableWidget: For displaying tabular data like stats or search results (use QTableView with a model for efficiency).
+- QComboBox: Dropdown menu for selections (e.g., position filters).
+- QLineEdit: Text input field (e.g., search bar).
+- QLabel: Static text or image display.
+- QPushButton: Clickable button (e.g., 'Search', 'Reset Filters').
+- QScrollArea: For scrollable content if data overflows.
+- QVBoxLayout/QHBoxLayout/QGridLayout: Layout managers to arrange widgets vertically, horizontally, or in grids.
+- stylesheet: CSS-like strings to style widgets (e.g., background-color: #000000; color: #FFFFFF;).
+- Signal/Slot: Qt's event system – connect a signal (e.g., button.clicked) to a slot (your function).
+
+Stylistic Design Details
+------------------------
+Aim to mimic OOTP's dark, professional sim-game aesthetic:
+- Overall Theme: Dark mode.
+  - Background: #1E1E1E (dark gray/black) for main areas, #0A0A0A for deeper panels.
+  - Text: #FFFFFF (white) for labels, #D3D3D3 (light gray) for secondary text.
+  - Accents: #00FF00 (bright green) for buttons like 'Continue', 'Auto-play', 'Search'.
+  - Tabs/Headers: #003366 (dark blue) background with #FFFFFF text.
+  - Borders: Thin #333333 (darker gray) borders around panels/tables.
+  - Icons: Use MLB-like logos but replace with NFL shields/helmets (fetch from URLs or embed small PNGs).
+- Fonts: Sans-serif like Arial or Segoe UI, size 10-12pt for body, 14pt bold for headers.
+- Shapes: Rectangular panels with subtle rounded corners (border-radius: 3px in stylesheets).
+  - Tables: Alternating row colors (#282828 / #1E1E1E), green/red indicators for ratings (e.g., green circle for high stats).
+  - Progress Bars/Ratings: Horizontal bars with colors: green (#00FF00) for high, yellow (#FFFF00) for medium, red (#FF0000) for low.
+- Layout: Dense but readable – left sidebars for filters/profiles, central tables for data, bottom status bars.
+- Images: Player headshots (fetch from nflverse or ESPN APIs), team logos (small, 32x32px).
+- Responsiveness: Use layouts that expand with window resize; min size 1200x800px.
+
+Step-by-Step Implementation Plan
+--------------------------------
+
+1. Setup Environment
+   - Install PySide6: pip install pyside6
+   - Install nflreadpy: pip install nflreadpy
+   - Optional: Qt Designer (pip install pyqt6-tools) for visual layout prototyping – save as .ui, load with uic.loadUiType().
+   - Create project structure:
+     - main.py: Entry point.
+     - ui/: For UI classes (e.g., find_player.py, player_details.py).
+     - data/: For data handlers (use your player.py as base).
+     - styles/: For global stylesheet.qss (CSS file).
+
+2. Global App Setup (main.py)
+   - Create a QApplication instance.
+   - Set global stylesheet:
+     app.setStyleSheet('''
+       QWidget { background-color: #1E1E1E; color: #FFFFFF; font: 11pt "Arial"; }
+       QPushButton { background-color: #00FF00; color: #000000; border: 1px solid #333333; border-radius: 3px; }
+       QTabWidget::pane { background: #0A0A0A; border: 1px solid #333333; }
+       QTableView { alternate-background-color: #282828; gridline-color: #333333; }
+       /* Add more as needed */
+     ''')
+   - Create QMainWindow subclass: class MainWindow(QMainWindow)
+     - Set window title: "NFL Player Explorer"
+     - Add menu bar: self.menuBar().addMenu("File").addAction("Exit")
+     - Set central widget to FindPlayerWidget (defined below).
+   - Run: app.exec()
+
+3. Find Player Screen (ui/find_player.py)
+   - Class: FindPlayerWidget(QWidget)
+   - Layout: QSplitter horizontal.
+     - Left: Filter panel (QVBoxLayout with QFormLayout for inputs).
+       - QLabel + QLineEdit: "Find Player" search bar.
+       - QCheckBox: "Search All Leagues", "Prospects Only", etc. (adapt to NFL: "Active Only", "Rookies Only").
+       - QComboBox: "Include [Team]" (fetch teams from nflreadpy.load_teams()).
+       - Age/Service/Contract filters: QSpinBox for min/max age, service time (years in NFL).
+       - Position: QComboBox with NFL positions (QB, RB, WR, TE, OL, DL, LB, DB, K, P).
+       - Ratings/Stats filters: QComboBox for stuff like "Local Popularity" (adapt to "Pro Bowl Selections", "Any").
+       - QPushButton: "Reset Filters", "Search".
+     - Right: Results area (QTableView).
+       - Use QStandardItemModel or custom model to display search results (name, team, position, age, etc.).
+       - Double-click row to open Player Details.
+   - Data: On "Search" click, use nflreadpy.load_players() filtered by inputs (use Polars for filtering).
+     - Signal: Connect search_button.clicked to self.perform_search()
+     - Display: Set model data with columns like in image (Name, Age, Pos, Team, Overall Rating – compute rating from stats?).
+   - Styling: Green "Search" button, dark search bar, dropdowns with white text on gray.
+
+4. Player Details Screens (ui/player_details.py)
+   - Class: PlayerDetailsWidget(QTabWidget) – Opens in new tab or dialog from Find Player.
+   - Tabs based on images:
+     - Profile: QSplitter vertical.
+       - Top: Player photo (QLabel with pixmap from URL via nflreadpy or ESPN).
+       - Info: QFormLayout with labels (Name, Position, Team, Age, Height/Weight, Draft Info).
+       - Bottom: Status panel (Health, Popularity, Morale) with colored indicators.
+     - Ratings: QGridLayout with bar graphs (QProgressBar styled green/yellow/red).
+       - Adapt baseball ratings to NFL: e.g., Contact -> Arm Strength, Power -> Speed.
+       - Fetch from PFF grades or compute from stats (use player.py's ratings if extended).
+     - Batting Stats -> Offensive/Defensive Stats: QTabWidget sub-tabs for Career, Season, Game Log.
+       - Use QTableView for tables (data from player.fetch_stats()).
+       - Adapt columns: AVG -> Completion %, SLG -> Yards/Att, etc.
+     - Pitching Stats: For QBs/Defense – similar tables.
+     - Fielding Stats: Tackles, Coverage for DBs.
+     - Real Life Stats: Fetch career totals.
+     - History: QTextEdit or QTableView for accomplishments, injuries, news (from player.py history).
+     - Editor: Optional for sim features (skip for now).
+   - Data Loading: On tab change, lazy-load data via player.fetch_stats(seasons=...) to avoid upfront downloads.
+   - Styling: Blue tab bar, green circles for ratings, tables with numeric columns right-aligned.
+
+5. Adapting to NFL
+   - Positions: Use nflreadpy's position groups (OFF, DEF, ST).
+   - Stats: Extend player.py for NFL-specific (e.g., passing_yards, sacks).
+     - Use fetch_nextgen_stats() for advanced metrics.
+     - For ratings: Derive from stats (e.g., overall = weighted average of key metrics).
+   - Teams/Leagues: Load from nflreadpy.load_teams(), filter to NFL.
+   - Years: Default to 1999-2025; UI dropdown for seasons.
+
+6. Data Handling
+   - Use your Player class as core.
+   - Fetch on-demand: e.g., player = Player(name=selected_name); stats = player.get_master_stats_table(seasons=[current_year])
+   - No local storage: nflreadpy pulls from GitHub/HTTP, no DB needed.
+   - Error Handling: Show QMessageBox for PlayerNotFoundError, etc.
+
+7. Incremental Development
+   - Step 1: Build empty MainWindow with stylesheet.
+   - Step 2: Add FindPlayerWidget with basic search (no filters).
+   - Step 3: Implement filters and table results.
+   - Step 4: Add PlayerDetailsWidget with Profile tab.
+   - Step 5: Add stats tabs, integrating player.py.
+   - Test: Use signals/slots for interactivity.
+
+8. Advanced Tips
+   - Performance: Use threading for API calls (QThread) to avoid UI freeze.
+   - Images: QNetworkAccessManager for async image loading.
+   - Expansion: Add team/league views later as new tabs in MainWindow.
+   - Learning: Qt docs (doc.qt.io), PySide examples. Start with simple QWidget apps.
+
+This should get you started – build one screen at a time!

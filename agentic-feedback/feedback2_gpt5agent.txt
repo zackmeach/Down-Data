@@ -1,0 +1,238 @@
+
+Detailed feedback for recreating an OOTP‑style interface for NFL data
+===================================================================
+
+This document summarises what is shown in the Out of the Park Baseball 26
+screenshots you provided and suggests how to recreate an equivalent user
+interface for real‑life NFL players using PySide/PyQt.  The focus is on
+simplicity, modularity and using off‑the‑shelf widgets so that a novice
+developer can iterate quickly, while still leaving room for future
+expansion.  Wherever possible, the notes recommend avoiding large local
+data downloads by querying data on demand via `nflreadpy` and the
+`Player` object in your repository.
+
+General layout principles
+------------------------
+
+* **Top‑level navigation** –  OOTP uses a narrow bar at the top with the
+  league logo, a dropdown to switch between league modules (offseason
+  centre, players, free agents, waiver wire, etc.) and a prominent
+  “Continue” button.  In PyQt you can recreate this using a
+  `QToolBar` or `QTabBar` placed inside a `QMainWindow`.  A
+  `QAction` with an icon can represent each section (e.g. “Players”,
+  “Teams”, “Draft”, “Season schedule”).  The “Continue” button is a
+  standard `QPushButton` anchored to the right.
+* **Dark theme** –  The screenshots show a dark background with light
+  text and a saturated accent colour on selected tabs.  You can apply
+  a similar look very quickly by using the `qdarktheme` package.  For
+  example, calling `qdarktheme.setup_theme()` applies a flat dark
+  palette automaticallyhttps://pyqtdarktheme.readthedocs.io/en/stable/how_to_use.html#:~:text=You%20can%20customize%20theme%20color.  If you want to adjust the
+  accent colour (the bright blue used for selected tabs), pass
+  `custom_colors={"primary": "#007ACC"}` to `setup_theme`https://pyqtdarktheme.readthedocs.io/en/stable/how_to_use.html#:~:text=You%20can%20customize%20theme%20color.  This
+  produces a professional dark UI without writing your own stylesheets.
+* **Consistent margins and spacing** –  Notice that OOTP aligns all
+  fields neatly.  Use `QVBoxLayout` and `QHBoxLayout` with uniform
+  spacing (4–8 px) to avoid clutter.  Group related controls inside
+  `QGroupBox` widgets with titles such as “Personal details” or
+  “Filters”.
+* **Terminology** –  Throughout this document the following terms are
+  used for UI elements:
+  
+  | Term               | Meaning in the UI                                                |
+  |--------------------|-----------------------------------------------------------------|
+  | navigation bar     | the top bar containing high‑level module buttons                |
+  | filter panel       | the left‑hand column where search criteria are defined          |
+  | result table       | the central area where matching players or stats are listed     |
+  | side panel         | the left column on a player page showing personal details       |
+  | tab bar            | the row of labels (e.g. “Summary”, “Contract”) used to switch   |
+  |                    | between subpages                                               |
+  | stats table        | a `QTableView` or `QTableWidget` presenting numerical data      |
+  | rating bar         | a custom widget resembling a horizontal progress bar for skills |
+
+Recreating the “Find a Player” page
+-----------------------------------
+
+The first screenshot shows the **Find a Player** screen, which lets you
+filter MLB players by age, salary, awards, ratings and statistics.
+Adapting this for NFL players requires two pieces: a flexible filter
+panel and a results list.
+
+### Filter panel
+
+* **Use Qt widgets that match the data type:**  Age ranges and service
+  time can be represented with two `QSpinBox` widgets for minimum and
+  maximum values.  Position checkboxes (e.g. QB, RB, WR, TE, OL, DL,
+  LB, DB, K) can be grouped in a `QGroupBox` with a `QGridLayout`.
+  Drop‑downs such as “Has won award” or “Team” map nicely to
+  `QComboBox`.  Boolean options (“Only free agents”) become
+  `QCheckBox` widgets.
+* **Ratings sliders:**  OOTP lets the user set minimum and maximum values
+  for attributes like “Stamina” or “Stuff”.  In PyQt you can use
+  `QSlider` or `QSpinBox` pairs, or a custom composite widget where a
+  label and two spin boxes are arranged horizontally.  For example:
+  
+  ```python
+  stamina_min = QSpinBox(); stamina_min.setRange(0, 99)
+  stamina_max = QSpinBox(); stamina_max.setRange(0, 99)
+  layout.addRow("Stamina", create_range_widget(stamina_min, stamina_max))
+  ```
+* **Reset and search buttons:**  Place two `QPushButton` widgets at
+  the bottom of the filter panel.  Connecting the “Reset filters”
+  button to a slot that resets each widget to its default value makes
+  testing easier.
+* **Layout:**  Use `QFormLayout` for the filter panel so labels and
+  fields are aligned.  Surround the entire panel with a `QScrollArea`
+  to support many criteria without expanding the window.
+
+### Results table
+
+* Use a `QTableView` backed by a `QAbstractTableModel` to display
+  matching players.  The model can expose columns such as “Name”,
+  “Team”, “Position”, “Age”, “Seasons played” and key stats like
+  career passing yards or rushing touchdowns.  When the user selects
+  a player in the table, emit a signal to display their profile in
+  the main view.
+* Because player searches may involve network calls (e.g. calling
+  `Player(name).info()` in `nflreadpy`), run the search inside a
+  worker thread.  Qt’s `QThreadPool` with `QRunnable` is useful here
+  so the UI remains responsive.  Update the model once the thread
+  finishes.
+
+### Data access pattern
+
+Your `Player` class already caches nflverse identifiers and can fetch
+stats on demand.  To minimise local storage:
+
+1. Use `PlayerFinder` to resolve ambiguous names.  When the user
+   enters a partial name or applies filters, call `Player` with the
+   appropriate filters (team, position, draft year) and return a small
+   set of candidate players.  Avoid loading stats until the user
+   opens a specific profile.
+2. When a player is selected, instantiate a `Player` object and cache
+   it.  The object stores only a few identifiers and biographical
+   fields in memory.  Use the provided methods (`fetch_stats()`,
+   `get_master_stats_table()`, `fetch_nextgen_stats()`) to retrieve
+   per‑season or per‑week data on demand.  Since nflverse limits
+   pre‑1999 weekly stats, you should validate the requested seasons and
+   provide user feedback when no data is available as described in the
+   project’s READMEhttps://pyqtdarktheme.readthedocs.io/en/stable/how_to_use.html#:~:text=You%20can%20customize%20theme%20color.
+
+
+Designing the player profile pages
+----------------------------------
+
+Once a user selects a player, you can switch the central widget to a
+profile view.  OOTP splits the profile into several tabs (Summary,
+Contract, Strategy, Development, Scouting, Injury History, BNN Page,
+Baseball Cards).  For an NFL application, consider the following
+structure:
+
+* **Summary tab:**  Show biographical data on the left in a side panel.
+  This includes name, birth date, height, weight, draft details and
+  team.  Use `QLabel` widgets in a `QFormLayout` so the values align
+  neatly.  Below that, add a “Status” group containing health status
+  and rest availability.  On the right, display the player’s current
+  attribute ratings using custom rating bars.  A simple implementation
+  uses `QProgressBar` with a fixed range (e.g. 0–100) and coloured
+  stylesheets for different categories (blue for speed, green for
+  catching, red for tackling, etc.).
+* **Contract tab:**  Replicate the contract page by showing “Contract
+  information” (contract type, years, salary per year) and “Roster
+  status information” (expectations, trade availability, service time,
+  option years) in separate `QGroupBox` widgets.  Use a
+  `QTableWidget` to list the yearly salary schedule.  Provide a button
+  to negotiate an extension, which could open a dialog or simply be
+  disabled at first.
+* **Injury history tab:**  Display a `QTableView` with columns for
+  date, description, body part, setbacks, day‑to‑day flag, effect and
+  injury duration.  The `Player` class does not supply injury data,
+  but you could populate this with publicly available information or
+  leave the table blank initially.
+* **Stats tabs:**  A set of tabs dedicated to statistics can mirror the
+  batting/pitching splits in OOTP.  For NFL this could include
+  “Career stats”, “Season splits”, “Game logs”, “Situational
+  splits” (e.g. vs. man zone coverage) and “NextGen stats”.  Each
+  subtab contains a `QTableView` with a model built from the data
+  returned by `get_master_stats_table()` or `fetch_stats()`.
+  Provide drop‑down filters above the table: season selector (`QComboBox`),
+  opponent filter, home/away filter and date range pickers (`QDateEdit`).
+* **History/Accomplishments tab:**  Use two vertical panes: one for
+  career milestones and awards, and another for memorable games.  A
+  `QListWidget` can list awards with year and description, while a
+  `QTreeWidget` might group achievements by season.  For game
+  achievements, a simple scrollable text area is sufficient.
+
+
+Styling notes
+-------------
+
+1. **Dark palette with custom accent:**  Use the `qdarktheme` library to
+   apply a dark theme to the entire application.  Call
+   `qdarktheme.setup_theme()` early in your main function.  To change
+   the accent colour, pass a `custom_colors` dictionary, e.g.
+   `qdarktheme.setup_theme(custom_colors={"primary": "#00A3E0"})`
+  https://pyqtdarktheme.readthedocs.io/en/stable/how_to_use.html#:~:text=You%20can%20customize%20theme%20color.  Use a cool blue or teal similar to the OOTP selected
+   tabs.
+2. **Sharp corners:**  The original OOTP panels have square
+   corners.  Pass `corner_shape="sharp"` to `setup_theme` to avoid
+   rounded edgeshttps://pyqtdarktheme.readthedocs.io/en/stable/how_to_use.html#:~:text=You%20can%20also%20change%20border,corner%20shape.
+3. **Additional QSS:**  For fine‑tuning, supply your own Qt stylesheet
+   via `additional_qss` to change border widths, fonts or spacing
+  https://pyqtdarktheme.readthedocs.io/en/stable/how_to_use.html#:~:text=Append%20your%20own%20stylesheets.  For example, you can style the rating bars:
+   
+   ```css
+   QProgressBar {
+       border: 1px solid #444;
+       border-radius: 0px;
+       text-align: right;
+       padding-right: 4px;
+   }
+   QProgressBar::chunk {
+       background-color: #2E8B57; /* green for run skills */
+   }
+   ````
+4. **Icons:**  When using `qdarktheme`, standard Qt icons follow the
+   theme colours automaticallyhttps://pyqtdarktheme.readthedocs.io/en/stable/how_to_use.html#:~:text=If%20you%20setup%20theme%20with,theme%20when%20theme%20is%20changed.  For more complex icons
+   (team logos, player headshots), store small PNGs in a resource file
+   and load them into `QLabel` or `QPushButton` icons.
+5. **Fonts:**  Use a clean sans‑serif font such as “Segoe UI” or
+   “Roboto” with a point size around 9–10 pt for tables and 11–12 pt
+   for headings.  Consistent typography enhances readability.
+
+
+Application architecture suggestions
+------------------------------------
+
+* **Main window with stacked pages:**  Implement a `QMainWindow`
+  containing a `QStackedWidget`.  Each major section (player finder,
+  player profile, team explorer, league year view, etc.) is a child
+  QWidget inside the stack.  When the user selects a navigation
+  action, change the current index of the stacked widget.
+* **Model–view separation:**  Use Qt’s model/view framework.  Define
+  subclasses of `QAbstractTableModel` for player lists, stats tables
+  and history lists.  This keeps your data separate from the
+  presentation and makes it easier to update the views when the
+  underlying DataFrame changes.
+* **Asynchronous data loading:**  Fetching stats via `nflreadr`
+  requires HTTP calls.  Use `QThread` or `concurrent.futures` with
+  signals/slots to perform these calls in the background.  Emit a
+  signal once data has loaded so the table model can be reset.
+* **Caching:**  The `Player` class already caches downloaded DataFrames
+  in memory.  Keep a dictionary mapping player IDs to `Player` objects
+  in your app so repeated lookups reuse the same instance.
+* **Extensibility:**  Start with the “Find a Player” page and a basic
+  profile view.  When comfortable, add new tabs such as “Teams” or
+  “Schedule” by following the same pattern: design a filter panel,
+  build a table model and integrate with the main navigation bar.
+
+
+Final remarks
+-------------
+
+Recreating the entire OOTP interface is an ambitious project, but by
+breaking the problem into small, self‑contained widgets you can make
+steady progress.  Focus first on the core functionality—searching for
+players and displaying basic information—before implementing more
+advanced pages.  Leveraging PyQt’s layouts, `qdarktheme` for styling
+and `nflreadpy` for data retrieval will allow you to build a polished
+application without overwhelming your machine with downloaded data.

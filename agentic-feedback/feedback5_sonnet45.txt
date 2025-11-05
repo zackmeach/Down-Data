@@ -1,0 +1,2180 @@
+===============================================================================
+NFL PLAYER UI IMPLEMENTATION GUIDE
+Based on OOTP26 Interface Recreation
+===============================================================================
+
+This document provides a comprehensive guide for recreating the OOTP26 user
+interface for NFL players, stats, teams, and league years.
+
+===============================================================================
+TABLE OF CONTENTS
+===============================================================================
+
+1. EXECUTIVE SUMMARY
+2. FRAMEWORK CHOICE: PySide6 vs PyQt6
+3. DATA ARCHITECTURE & API STRATEGY
+4. UI DESIGN ANALYSIS
+5. COLOR SCHEME & STYLING
+6. UI TERMINOLOGY & COMPONENT REFERENCE
+7. APPLICATION ARCHITECTURE
+8. IMPLEMENTATION ROADMAP
+9. DETAILED COMPONENT BREAKDOWN
+10. CODE STRUCTURE RECOMMENDATIONS
+11. COMMON PITFALLS & SOLUTIONS
+12. NEXT STEPS & RESOURCES
+
+===============================================================================
+1. EXECUTIVE SUMMARY
+===============================================================================
+
+PROJECT GOAL:
+Recreate OOTP26's professional sports management interface for NFL data,
+starting with a "Find Player" page and expanding to full player profiles.
+
+KEY REQUIREMENTS:
+- Start with Find Player search page
+- Use PySide6/PyQt6 for native desktop performance
+- Minimize local storage, maximize API usage
+- Keep architecture simple and learnable for beginners
+- Match OOTP's dark theme with teal/blue accents
+
+RECOMMENDED APPROACH:
+1. Use PySide6 (officially supported, LGPL license)
+2. Leverage nflreadpy for NFL data (already in your Player class)
+3. Build modular widget components matching OOTP's layout
+4. Use Qt Designer for initial layout prototyping
+5. Implement dark stylesheet with QSS (Qt Style Sheets)
+
+ESTIMATED COMPLEXITY:
+- Basic Find Player page: 1-2 weeks for beginner
+- Full player profile with tabs: 3-4 weeks
+- Polish and advanced features: 2-3 weeks
+
+===============================================================================
+2. FRAMEWORK CHOICE: PySide6 vs PyQt6
+===============================================================================
+
+RECOMMENDATION: PySide6
+
+WHY PySide6:
+✓ Officially maintained by Qt Company
+✓ LGPL license (more permissive for distribution)
+✓ Same API as PyQt6 (can switch if needed)
+✓ Better long-term support and documentation
+✓ Includes Qt Designer for visual layout editing
+✓ Excellent performance for desktop applications
+✓ Native look and feel on Windows/Mac/Linux
+
+INSTALLATION:
+    pip install PySide6
+
+KEY ADVANTAGES FOR YOUR PROJECT:
+1. SPEED: Native compiled widgets, not web-based (much faster than Electron)
+2. FLEXIBILITY: Complete control over every pixel and interaction
+3. WIDGETS: Built-in tables, trees, tabs, splitters match OOTP perfectly
+4. STYLING: QSS (Qt Style Sheets) similar to CSS for theming
+5. LAYOUTS: Sophisticated layout managers handle resizing automatically
+6. SIGNALS/SLOTS: Clean event system for user interactions
+
+===============================================================================
+3. DATA ARCHITECTURE & API STRATEGY
+===============================================================================
+
+YOUR CURRENT SETUP:
+- Player class using nflreadpy (NFLverse data)
+- Polars DataFrames for efficient data manipulation
+- Good foundation for API-first approach
+
+RECOMMENDED DATA SOURCES:
+---------------------------
+
+PRIMARY: NFLverse (via nflreadpy) - FREE, COMPREHENSIVE
+- Player stats: 1999-present, weekly and seasonal
+- Play-by-play data: every play since 1999
+- NextGen Stats: 2016-present (advanced metrics)
+- Rosters, schedules, draft picks
+- No API key required, cached locally by nflreadpy
+
+SUPPLEMENTARY SOURCES (if needed):
+- ESPN API (unofficial): Real-time scores, news
+- Pro Football Reference: Historical data (scraping)
+- Sleeper API: Fantasy football data
+- The Athletic/RSS feeds: News and articles
+
+DATA STRATEGY:
+--------------
+
+1. PLAYER SEARCH DATA:
+   - Load nflreadpy player list once at startup (fast, ~50KB)
+   - Cache in memory as Polars DataFrame
+   - Filter locally for instant search results
+   - NO need to hit API for every search
+
+2. PLAYER DETAILS:
+   - Lazy load stats when player is selected
+   - Cache in Player object (already implemented)
+   - Pre-fetch common views (career stats) in background
+   - Store frequently accessed players in app session
+
+3. STATS TABLES:
+   - Load on-demand per season/range
+   - Cache in memory during session
+   - Use nflreadpy's built-in caching (stores in user's cache dir)
+   - Only re-download if data is stale (nflreadpy handles this)
+
+4. REDUCING LOCAL STORAGE:
+   - nflreadpy already caches efficiently (~500MB for all data)
+   - Delete cache periodically if needed
+   - Or: fetch specific seasons only (on-demand)
+   - Your computer can handle this easily (modern phones have more RAM)
+
+PRACTICAL IMPLEMENTATION:
+--------------------------
+
+class DataManager:
+    """Centralized data access for the application."""
+    
+    def __init__(self):
+        self._players_cache = None
+        self._current_player = None
+        self._session_cache = {}  # Recently viewed players
+    
+    def get_all_players(self):
+        """Load player list once, cache forever during session."""
+        if self._players_cache is None:
+            # This is fast, ~1-2 seconds first time
+            self._players_cache = PlayerDataSource.combined()
+        return self._players_cache
+    
+    def search_players(self, name="", position=None, team=None, ...):
+        """Filter cached player list instantly."""
+        df = self.get_all_players()
+        # Apply filters using Polars (extremely fast)
+        # Return filtered results
+    
+    def get_player_stats(self, player_id, seasons=None):
+        """Lazy load stats, cache in session."""
+        cache_key = f"{player_id}_{seasons}"
+        if cache_key not in self._session_cache:
+            # Load from nflreadpy (uses its own disk cache)
+            self._session_cache[cache_key] = load_data(...)
+        return self._session_cache[cache_key]
+
+MEMORY CONSIDERATIONS:
+- Full player list: ~5-10MB in RAM
+- Single player's career stats: ~100-500KB
+- 100 recently viewed players: ~50MB
+- TOTAL: < 100MB for excellent performance
+- Your RAM can easily handle this
+
+===============================================================================
+4. UI DESIGN ANALYSIS
+===============================================================================
+
+COMMON LAYOUT PATTERNS IN OOTP:
+--------------------------------
+
+1. MAIN WINDOW STRUCTURE:
+   ┌─────────────────────────────────────────────────────────────┐
+   │ Menu Bar (File, Game, Player, etc.)                         │
+   ├─────────────────────────────────────────────────────────────┤
+   │ Navigation Bar (Back/Forward, Context Info, Actions)        │
+   ├─────────────────────────────────────────────────────────────┤
+   │                                                             │
+   │                   MAIN CONTENT AREA                         │
+   │                                                             │
+   └─────────────────────────────────────────────────────────────┘
+
+2. FIND PLAYER LAYOUT:
+   ┌──────────────┬──────────────────────────────────────────────┐
+   │              │  MATCHING PLAYERS                            │
+   │  FILTERS     │  ┌────────────────────────────────────────┐  │
+   │              │  │ Search Box                             │  │
+   │  Position    │  └────────────────────────────────────────┘  │
+   │  Tabs        │                                              │
+   │              │  ┌────────────────────────────────────────┐  │
+   │  Search      │  │                                        │  │
+   │  Criteria    │  │     Results Table                      │  │
+   │  - Age       │  │     (scrollable)                       │  │
+   │  - Contract  │  │                                        │  │
+   │  - Ratings   │  │                                        │  │
+   │  - Stats     │  │                                        │  │
+   │              │  └────────────────────────────────────────┘  │
+   │              │                                              │
+   │  [RESET]     │  Result Count: XXX players                   │
+   │  [SEARCH]    │                                              │
+   └──────────────┴──────────────────────────────────────────────┘
+
+   Qt Widgets:
+   - QSplitter (resizable divider between panels)
+   - QScrollArea (left panel with filters)
+   - QTableWidget or QTableView (results table)
+   - QLineEdit (search box)
+   - QComboBox (dropdowns for Age, Contract, etc.)
+   - QSlider (rating filters with labels)
+   - QCheckBox (boolean filters)
+   - QTabWidget (position tabs: Pitchers/Hitters → QB/RB/WR/etc.)
+
+3. PLAYER PROFILE LAYOUT:
+   ┌─────────────────────────────────────────────────────────────┐
+   │ ┌───┐  PLAYER NAME | Position | Team | Age | Bio Info      │
+   │ │IMG│                                                        │
+   │ └───┘  Contract: $XX.XM | Jersey: #XX                       │
+   ├─────────────────────────────────────────────────────────────┤
+   │ [Profile][Ratings][Stats][History][Real Life Stats][Editor]│ <-- Tab Bar
+   ├─────────────────────────────────────────────────────────────┤
+   │ [Summary][Contract][Strategy][Development][Scouting][etc.]  │ <-- Sub-tabs
+   ├───────────────┬─────────────────────────────────────────────┤
+   │               │                                             │
+   │  PERSONAL     │         MAIN CONTENT AREA                   │
+   │  DETAILS      │                                             │
+   │               │  (Changes based on selected tab)            │
+   │  - Age        │                                             │
+   │  - Birth      │  - Tables (stats, contract)                 │
+   │  - City       │  - Forms (editable fields)                  │
+   │  - Position   │  - Charts (ratings bars)                    │
+   │  - Team       │  - Text (accomplishments)                   │
+   │               │                                             │
+   │  STATUS       │                                             │
+   │  - Health     │                                             │
+   │  - Injury     │                                             │
+   └───────────────┴─────────────────────────────────────────────┘
+
+   Qt Widgets:
+   - QWidget (player header with layout)
+   - QLabel (text display, can show images)
+   - QTabWidget (main tabs: Profile, Ratings, Stats, etc.)
+   - QTabWidget nested (sub-tabs within main tabs)
+   - QSplitter (sidebar vs main content)
+   - QFrame (sections with borders)
+   - QGroupBox (titled sections like "Personal Details")
+   - QFormLayout (label: value pairs in sidebar)
+
+4. STATS TABLE LAYOUT:
+   ┌─────────────────────────────────────────────────────────────┐
+   │ Filter: [All Leagues ▾] [All Teams ▾] Dates: [Jan▾] - [Dec▾]│
+   ├─────────────────────────────────────────────────────────────┤
+   │ Year  │ TM │ LVL │  G │  GS │  PA │  AB │  R │  H │  2B ... │
+   ├───────┼────┼─────┼────┼─────┼─────┼─────┼────┼────┼─────────┤
+   │ 2027  │LAA │ MLB │ 11 │   7 │ 661 │ 582 │131 │173 │  28 ... │
+   │ 2026  │LAD │ MLB │ 26 │  26 │ 104 │  90 │ 14 │ 23 │  10 ... │
+   │ 2025  │LAD │ MLB │152 │ 152 │ 727 │ 611 │146 │172 │  25 ... │
+   ├───────┴────┴─────┴────┴─────┴─────┴─────┴────┴────┴─────────┤
+   │ TOTAL                  │1199 │ 800 │5091 │4402 │853 │1246 ... │
+   │ Career Highs           │ 159 │ 153 │ 731 │ 636 │146 │ 197 ... │
+   └─────────────────────────────────────────────────────────────┘
+
+   Qt Widgets:
+   - QComboBox (filter dropdowns)
+   - QTableWidget (data grid)
+   - Custom delegates for cell formatting (colors for negative numbers, etc.)
+   - QHeaderView (column headers)
+
+DESIGN PRINCIPLES FROM OOTP:
+-----------------------------
+
+1. INFORMATION DENSITY:
+   - Pack lots of data without feeling cluttered
+   - Use subtle borders and spacing
+   - Group related information
+   - Hierarchy: bold headers, lighter content
+
+2. INTERACTIVE ELEMENTS:
+   - Hover effects on clickable items
+   - Clear selection states
+   - Visual feedback for actions
+   - Tooltips for complex stats
+
+3. NAVIGATION:
+   - Tab-based navigation (2 levels deep max)
+   - Breadcrumb trail in top bar
+   - Back/forward buttons
+   - Direct links (click player name to go to profile)
+
+4. DATA PRESENTATION:
+   - Tables for structured data
+   - Horizontal bars for ratings (with color coding)
+   - Inline editing where appropriate
+   - Sort indicators in table headers
+   - Alternating row colors for readability
+
+===============================================================================
+5. COLOR SCHEME & STYLING
+===============================================================================
+
+OOTP COLOR PALETTE (from screenshots):
+---------------------------------------
+
+BACKGROUNDS:
+- Primary Background: #2B2B2B (dark gray)
+- Secondary Background: #333333 (slightly lighter)
+- Panel Background: #252525 (darker panels)
+- Input Background: #404040 (text boxes, dropdowns)
+- Header Background: #1E1E1E (very dark)
+
+ACCENTS:
+- Primary Accent: #2A8CA5 (teal/cyan blue)
+- Secondary Accent: #1E6B7E (darker teal)
+- Highlight: #3A9CB5 (bright teal for hover)
+- Selection: #2A8CA5 (same as primary)
+
+TEXT:
+- Primary Text: #FFFFFF (white)
+- Secondary Text: #CCCCCC (light gray)
+- Disabled Text: #808080 (medium gray)
+- Link Text: #5DADE2 (light blue)
+
+BORDERS:
+- Subtle Border: #404040 (dark gray)
+- Active Border: #2A8CA5 (teal)
+- Panel Border: #1E1E1E (very dark)
+
+SEMANTIC COLORS:
+- Positive/Good: #4CAF50 (green)
+- Negative/Bad: #F44336 (red)
+- Warning: #FF9800 (orange)
+- Info: #2196F3 (blue)
+- Excellent/Elite: #00FF00 (bright green)
+
+TABLE COLORS:
+- Row Background (odd): #2B2B2B
+- Row Background (even): #303030
+- Row Hover: #353535
+- Row Selected: #2A8CA5 (with 30% opacity)
+- Cell Border: #404040
+
+BUTTON COLORS:
+- Normal: #404040
+- Hover: #4A4A4A
+- Pressed: #353535
+- Primary Button: #2A8CA5
+- Primary Hover: #3A9CB5
+
+QSS STYLESHEET EXAMPLE:
+-----------------------
+
+```css
+/* Main Application Style */
+QMainWindow {
+    background-color: #2B2B2B;
+    color: #FFFFFF;
+}
+
+/* Push Buttons */
+QPushButton {
+    background-color: #404040;
+    color: #FFFFFF;
+    border: 1px solid #555555;
+    border-radius: 3px;
+    padding: 5px 15px;
+    font-size: 12px;
+}
+
+QPushButton:hover {
+    background-color: #4A4A4A;
+    border: 1px solid #2A8CA5;
+}
+
+QPushButton:pressed {
+    background-color: #353535;
+}
+
+QPushButton:disabled {
+    background-color: #303030;
+    color: #808080;
+    border: 1px solid #404040;
+}
+
+/* Primary Action Buttons */
+QPushButton#primaryButton {
+    background-color: #2A8CA5;
+    border: 1px solid #1E6B7E;
+}
+
+QPushButton#primaryButton:hover {
+    background-color: #3A9CB5;
+}
+
+/* Input Fields */
+QLineEdit, QTextEdit, QPlainTextEdit {
+    background-color: #404040;
+    color: #FFFFFF;
+    border: 1px solid #555555;
+    border-radius: 3px;
+    padding: 4px;
+    selection-background-color: #2A8CA5;
+}
+
+QLineEdit:focus, QTextEdit:focus {
+    border: 1px solid #2A8CA5;
+}
+
+/* Combo Boxes (Dropdowns) */
+QComboBox {
+    background-color: #404040;
+    color: #FFFFFF;
+    border: 1px solid #555555;
+    border-radius: 3px;
+    padding: 4px;
+    min-width: 80px;
+}
+
+QComboBox:hover {
+    border: 1px solid #2A8CA5;
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: 20px;
+}
+
+QComboBox::down-arrow {
+    image: url(icons/down-arrow.png);
+}
+
+QComboBox QAbstractItemView {
+    background-color: #333333;
+    color: #FFFFFF;
+    selection-background-color: #2A8CA5;
+    border: 1px solid #555555;
+}
+
+/* Tables */
+QTableWidget, QTableView {
+    background-color: #2B2B2B;
+    alternate-background-color: #303030;
+    color: #FFFFFF;
+    gridline-color: #404040;
+    border: 1px solid #404040;
+    selection-background-color: rgba(42, 140, 165, 0.3);
+}
+
+QTableWidget::item:hover, QTableView::item:hover {
+    background-color: #353535;
+}
+
+QTableWidget::item:selected, QTableView::item:selected {
+    background-color: #2A8CA5;
+}
+
+QHeaderView::section {
+    background-color: #1E1E1E;
+    color: #FFFFFF;
+    padding: 5px;
+    border: 1px solid #404040;
+    font-weight: bold;
+}
+
+QHeaderView::section:hover {
+    background-color: #252525;
+}
+
+/* Tabs */
+QTabWidget::pane {
+    border: 1px solid #404040;
+    background-color: #2B2B2B;
+}
+
+QTabBar::tab {
+    background-color: #333333;
+    color: #CCCCCC;
+    border: 1px solid #404040;
+    border-bottom: none;
+    padding: 8px 16px;
+    margin-right: 2px;
+}
+
+QTabBar::tab:selected {
+    background-color: #2A8CA5;
+    color: #FFFFFF;
+}
+
+QTabBar::tab:hover {
+    background-color: #3A9CB5;
+}
+
+/* Scroll Bars */
+QScrollBar:vertical {
+    background-color: #2B2B2B;
+    width: 14px;
+    border: none;
+}
+
+QScrollBar::handle:vertical {
+    background-color: #555555;
+    border-radius: 7px;
+    min-height: 20px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background-color: #666666;
+}
+
+QScrollBar:horizontal {
+    background-color: #2B2B2B;
+    height: 14px;
+    border: none;
+}
+
+QScrollBar::handle:horizontal {
+    background-color: #555555;
+    border-radius: 7px;
+    min-width: 20px;
+}
+
+/* Splitters */
+QSplitter::handle {
+    background-color: #404040;
+}
+
+QSplitter::handle:horizontal {
+    width: 2px;
+}
+
+QSplitter::handle:vertical {
+    height: 2px;
+}
+
+QSplitter::handle:hover {
+    background-color: #2A8CA5;
+}
+
+/* Group Boxes */
+QGroupBox {
+    color: #FFFFFF;
+    border: 1px solid #404040;
+    border-radius: 3px;
+    margin-top: 10px;
+    padding-top: 10px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 0 5px;
+    color: #2A8CA5;
+    font-weight: bold;
+}
+
+/* Sliders */
+QSlider::groove:horizontal {
+    background: #404040;
+    height: 6px;
+    border-radius: 3px;
+}
+
+QSlider::handle:horizontal {
+    background: #2A8CA5;
+    width: 16px;
+    height: 16px;
+    margin: -5px 0;
+    border-radius: 8px;
+}
+
+QSlider::handle:horizontal:hover {
+    background: #3A9CB5;
+}
+
+/* Check Boxes */
+QCheckBox {
+    color: #FFFFFF;
+    spacing: 5px;
+}
+
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #555555;
+    border-radius: 3px;
+    background-color: #404040;
+}
+
+QCheckBox::indicator:checked {
+    background-color: #2A8CA5;
+    border: 1px solid #1E6B7E;
+}
+
+QCheckBox::indicator:hover {
+    border: 1px solid #2A8CA5;
+}
+
+/* Labels */
+QLabel {
+    color: #FFFFFF;
+}
+
+QLabel#headerLabel {
+    color: #2A8CA5;
+    font-size: 14px;
+    font-weight: bold;
+}
+
+QLabel#secondaryLabel {
+    color: #CCCCCC;
+    font-size: 11px;
+}
+```
+
+IMPLEMENTING STYLES IN CODE:
+-----------------------------
+
+Option 1: External .qss file
+```python
+# Load stylesheet from file
+with open('styles/dark_theme.qss', 'r') as f:
+    app.setStyleSheet(f.read())
+```
+
+Option 2: Inline in Python
+```python
+app.setStyleSheet("""
+    QMainWindow { background-color: #2B2B2B; }
+    QPushButton { background-color: #404040; }
+    /* ... rest of styles ... */
+""")
+```
+
+RECOMMENDATION: Use external .qss file for maintainability
+
+===============================================================================
+6. UI TERMINOLOGY & COMPONENT REFERENCE
+===============================================================================
+
+ESSENTIAL QT WIDGET VOCABULARY:
+--------------------------------
+
+1. CONTAINER WIDGETS (hold other widgets):
+
+   QMainWindow:
+   - The top-level window of your application
+   - Has menu bar, toolbars, status bar, central widget
+   - Use this as your application's main window
+
+   QWidget:
+   - Basic building block, can contain other widgets
+   - Used as containers with layouts
+   - Everything inherits from QWidget
+
+   QFrame:
+   - QWidget with a frame/border
+   - Use for visual grouping
+   - Can have different frame styles (raised, sunken, etc.)
+
+   QGroupBox:
+   - QFrame with a title
+   - Perfect for "Personal Details", "Contract Info" sections
+   - Has built-in title styling
+
+   QSplitter:
+   - Resizable divider between widgets
+   - Users can drag to resize panes
+   - Essential for OOTP's filter panel vs results layout
+
+   QScrollArea:
+   - Makes any widget scrollable
+   - Auto-adds scrollbars when content is too large
+   - Wrap your filter panel in this
+
+   QStackedWidget:
+   - Shows one widget at a time from a stack
+   - Switch between different views
+   - Alternative to tabs for some layouts
+
+2. LAYOUT MANAGERS (arrange widgets):
+
+   QVBoxLayout:
+   - Arranges widgets vertically (top to bottom)
+   - Like CSS flexbox with flex-direction: column
+
+   QHBoxLayout:
+   - Arranges widgets horizontally (left to right)
+   - Like CSS flexbox with flex-direction: row
+
+   QGridLayout:
+   - Grid system (rows and columns)
+   - Like HTML table or CSS Grid
+   - addWidget(widget, row, column, rowSpan, columnSpan)
+
+   QFormLayout:
+   - Two columns: labels and fields
+   - Perfect for "Name: John Smith" style layouts
+   - Automatically aligns labels
+
+   Example:
+   ```python
+   layout = QFormLayout()
+   layout.addRow("Name:", QLabel("John Smith"))
+   layout.addRow("Age:", QLabel("25"))
+   layout.addRow("Position:", QLabel("QB"))
+   ```
+
+3. INPUT WIDGETS (user interaction):
+
+   QLineEdit:
+   - Single-line text input
+   - Has signals: textChanged, editingFinished, returnPressed
+   - Use for search boxes, short text fields
+
+   QTextEdit:
+   - Multi-line text input
+   - Rich text support (HTML)
+   - Use for notes, descriptions
+
+   QComboBox:
+   - Dropdown menu
+   - Add items: addItem(), addItems([list])
+   - Get current: currentText(), currentIndex()
+   - Signal: currentTextChanged, currentIndexChanged
+
+   QSpinBox / QDoubleSpinBox:
+   - Number input with up/down arrows
+   - Set range: setRange(min, max)
+   - Good for age filters, year selection
+
+   QSlider:
+   - Draggable slider
+   - Horizontal or vertical
+   - Use for rating filters (0-100)
+   - Connect to QLabel to show current value
+
+   QCheckBox:
+   - True/false checkbox
+   - Signal: stateChanged, toggled
+   - Use for "Active Players Only", "Include Rookies"
+
+   QRadioButton:
+   - Multiple choice (only one selected in group)
+   - Use QButtonGroup to group them
+   - Alternative to dropdown for 2-3 options
+
+   QPushButton:
+   - Clickable button
+   - Signal: clicked
+   - Use for "Search", "Reset", "Save"
+
+4. DISPLAY WIDGETS (show data):
+
+   QLabel:
+   - Display text or images
+   - Can show HTML: setText("<b>Bold</b>")
+   - Can show images: setPixmap(QPixmap("image.png"))
+   - Use for player names, stats, any text
+
+   QTableWidget:
+   - Full table with built-in data storage
+   - Easy to use: setItem(row, col, QTableWidgetItem("text"))
+   - Good for beginners
+   - Can be slow with 10,000+ rows
+
+   QTableView + QAbstractTableModel:
+   - More advanced: separates data from view
+   - Much faster for large datasets
+   - Recommended for stats tables with many rows
+   - Requires understanding Model-View architecture
+
+   QTreeWidget / QTreeView:
+   - Hierarchical tree structure
+   - Like file explorer
+   - Use for nested data (team → players → stats)
+
+   QListWidget / QListView:
+   - Vertical list of items
+   - Simpler than table
+   - Use for navigation menus
+
+5. NAVIGATION WIDGETS:
+
+   QTabWidget:
+   - Tabbed interface
+   - Essential for player profile (Profile, Stats, History tabs)
+   - Add tabs: addTab(widget, "Tab Name")
+   - Can nest QTabWidgets for sub-tabs
+
+   QTabBar:
+   - Just the tabs without content area
+   - More customizable than QTabWidget
+   - Use if you want custom tab behavior
+
+   QMenuBar:
+   - Top menu (File, Edit, View, etc.)
+   - Part of QMainWindow
+   - Add menus: addMenu("File")
+
+   QToolBar:
+   - Icon-based toolbar
+   - Commonly below menu bar
+   - Add actions: addAction(QAction(...))
+
+   QStatusBar:
+   - Bottom status bar
+   - Show temporary messages: showMessage("Loading...")
+
+6. PROGRESS & FEEDBACK WIDGETS:
+
+   QProgressBar:
+   - Show loading progress
+   - Use when fetching large datasets
+   - setValue(0-100)
+
+   QMessageBox:
+   - Popup dialogs
+   - Information, warning, error, question
+   - QMessageBox.information(parent, "Title", "Message")
+
+   QToolTip:
+   - Hover tooltips
+   - Set on any widget: widget.setToolTip("Help text")
+
+OOTP SCREEN COMPONENT MAPPING:
+-------------------------------
+
+FIND PLAYER SCREEN:
+- Main window: QMainWindow
+- Left/right split: QSplitter (horizontal)
+- Left panel container: QScrollArea containing QWidget
+- Position tabs (Pitchers/Hitters): QTabWidget
+- Filter sections: QGroupBox or QFrame with QLabel headers
+- Age dropdowns: QComboBox
+- Rating sliders: QSlider + QLabel (for value display)
+- Checkboxes: QCheckBox
+- Search/Reset buttons: QPushButton
+- Results table: QTableWidget or QTableView
+- Search box: QLineEdit
+
+PLAYER PROFILE SCREEN:
+- Main container: QMainWindow
+- Header area: QWidget with QHBoxLayout
+- Player photo: QLabel with QPixmap
+- Player info labels: QLabel
+- Main tabs (Profile/Stats/History): QTabWidget
+- Sub-tabs (Summary/Contract/etc.): Nested QTabWidget
+- Left sidebar: QFrame or QGroupBox
+- Personal details: QFormLayout inside sidebar
+- Stats table: QTableView + custom model
+- Rating bars: QProgressBar or custom painted QWidget
+- Multi-section layout: QVBoxLayout with QGroupBox sections
+
+COMMON PATTERNS:
+----------------
+
+Pattern: Left Sidebar + Main Content
+```python
+# Use QSplitter for resizable panels
+splitter = QSplitter(Qt.Horizontal)
+
+# Left sidebar
+sidebar = QWidget()
+sidebar_layout = QVBoxLayout()
+sidebar.setLayout(sidebar_layout)
+# Add personal details, status, etc.
+
+# Main content
+content = QWidget()
+content_layout = QVBoxLayout()
+content.setLayout(content_layout)
+# Add tabs, tables, etc.
+
+splitter.addWidget(sidebar)
+splitter.addWidget(content)
+splitter.setSizes([250, 750])  # Ratio
+```
+
+Pattern: Nested Tabs
+```python
+main_tabs = QTabWidget()
+
+# Profile tab with sub-tabs
+profile_subtabs = QTabWidget()
+profile_subtabs.addTab(summary_widget, "Summary")
+profile_subtabs.addTab(contract_widget, "Contract")
+profile_subtabs.addTab(injury_widget, "Injury History")
+
+main_tabs.addTab(profile_subtabs, "Profile")
+main_tabs.addTab(stats_widget, "Stats")
+main_tabs.addTab(history_widget, "History")
+```
+
+Pattern: Filter Form
+```python
+filter_layout = QVBoxLayout()
+
+# Age filter
+age_group = QGroupBox("Age")
+age_layout = QHBoxLayout()
+age_from = QSpinBox()
+age_from.setRange(0, 50)
+age_to = QSpinBox()
+age_to.setRange(0, 50)
+age_layout.addWidget(QLabel("From:"))
+age_layout.addWidget(age_from)
+age_layout.addWidget(QLabel("To:"))
+age_layout.addWidget(age_to)
+age_group.setLayout(age_layout)
+filter_layout.addWidget(age_group)
+
+# Repeat for other filters...
+```
+
+Pattern: Data Table
+```python
+# Simple approach: QTableWidget
+table = QTableWidget()
+table.setRowCount(10)
+table.setColumnCount(5)
+table.setHorizontalHeaderLabels(["Year", "Team", "Games", "Yards", "TDs"])
+
+# Add data
+table.setItem(0, 0, QTableWidgetItem("2023"))
+table.setItem(0, 1, QTableWidgetItem("KC"))
+# ... etc
+
+# Advanced approach: QTableView + Model (better for large data)
+# (see detailed implementation section)
+```
+
+===============================================================================
+7. APPLICATION ARCHITECTURE
+===============================================================================
+
+RECOMMENDED STRUCTURE:
+----------------------
+
+app/
+├── main.py                 # Application entry point
+├── ui/
+│   ├── __init__.py
+│   ├── main_window.py      # Main application window
+│   ├── find_player.py      # Find player search widget
+│   ├── player_profile.py   # Player profile container
+│   ├── widgets/
+│   │   ├── __init__.py
+│   │   ├── player_header.py      # Reusable player header
+│   │   ├── stats_table.py        # Stats table widget
+│   │   ├── rating_bar.py         # Visual rating bars
+│   │   ├── filter_panel.py       # Search filter panel
+│   │   └── profile_tabs.py       # Profile tab content
+├── data/
+│   ├── __init__.py
+│   ├── manager.py          # DataManager class (caching, API calls)
+│   ├── models.py           # Data models for tables
+│   └── player.py           # Your existing Player class
+├── resources/
+│   ├── styles/
+│   │   └── dark_theme.qss  # Stylesheet
+│   ├── icons/              # Icons for buttons, etc.
+│   └── images/             # Default player photos, logos
+└── requirements.txt
+
+ARCHITECTURE LAYERS:
+--------------------
+
+1. DATA LAYER (data/)
+   - Handles all API calls and data fetching
+   - Caches data in memory
+   - Provides clean interfaces to UI layer
+   - No UI code here
+
+2. UI LAYER (ui/)
+   - Presents data to user
+   - Handles user interactions
+   - Calls data layer for information
+   - No direct API calls here
+
+3. APPLICATION LAYER (main.py)
+   - Creates main window
+   - Wires up data layer and UI layer
+   - Application lifecycle management
+
+FLOW EXAMPLE:
+-------------
+
+User searches for player:
+1. User types in search box (UI Layer: FindPlayerWidget)
+2. Search box emits textChanged signal
+3. FindPlayerWidget calls DataManager.search_players(text)
+4. DataManager filters cached player list (Data Layer)
+5. DataManager returns filtered list
+6. FindPlayerWidget updates table with results
+7. User clicks on player row
+8. FindPlayerWidget emits playerSelected signal
+9. MainWindow catches signal
+10. MainWindow tells DataManager to load player details
+11. MainWindow creates PlayerProfileWidget with loaded data
+12. MainWindow switches view to player profile
+
+SIGNALS AND SLOTS:
+------------------
+
+Qt's event system. Think of it like JavaScript events, but type-safe.
+
+Signal: An event emitted by a widget
+Slot: A function that responds to a signal
+
+Example:
+```python
+# Built-in signals
+button.clicked.connect(self.on_button_clicked)
+search_box.textChanged.connect(self.on_search_text_changed)
+table.itemSelectionChanged.connect(self.on_selection_changed)
+
+# Custom signals
+from PySide6.QtCore import Signal
+
+class FindPlayerWidget(QWidget):
+    # Define custom signal (emits Player object)
+    playerSelected = Signal(object)
+    
+    def on_table_row_clicked(self, row):
+        player = self.get_player_from_row(row)
+        # Emit the signal
+        self.playerSelected.emit(player)
+
+# In MainWindow:
+find_player_widget.playerSelected.connect(self.show_player_profile)
+
+def show_player_profile(self, player):
+    # This gets called when user clicks a player
+    profile = PlayerProfileWidget(player)
+    self.setCentralWidget(profile)
+```
+
+KEY ARCHITECTURAL PRINCIPLES:
+------------------------------
+
+1. SEPARATION OF CONCERNS:
+   - Data management separate from UI
+   - Each widget has one clear purpose
+   - Reusable components
+
+2. SINGLE SOURCE OF TRUTH:
+   - DataManager holds all data
+   - UI widgets display data, don't store it
+   - When data changes, update from DataManager
+
+3. SIGNALS FOR COMMUNICATION:
+   - Widgets emit signals when something happens
+   - Parent widgets connect to child signals
+   - Keeps widgets decoupled (don't know about each other)
+
+4. LAZY LOADING:
+   - Only load data when needed
+   - Show loading indicators during fetch
+   - Cache loaded data
+
+5. COMPOSITION OVER INHERITANCE:
+   - Build complex widgets from simple ones
+   - Reuse common patterns (like headers, tables)
+   - Easier to maintain and test
+
+===============================================================================
+8. IMPLEMENTATION ROADMAP
+===============================================================================
+
+PHASE 1: PROJECT SETUP (1-2 days)
+----------------------------------
+✓ Install PySide6: pip install PySide6
+✓ Create project structure (folders as shown above)
+✓ Create main.py with basic QMainWindow
+✓ Create dark_theme.qss stylesheet
+✓ Test basic window with theme applied
+
+Code:
+```python
+# main.py
+import sys
+from PySide6.QtWidgets import QApplication, QMainWindow
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("NFL Player Explorer")
+        self.setMinimumSize(1200, 800)
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    
+    # Load stylesheet
+    with open("resources/styles/dark_theme.qss", "r") as f:
+        app.setStyleSheet(f.read())
+    
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
+```
+
+PHASE 2: DATA LAYER (2-3 days)
+-------------------------------
+✓ Move player.py to data/
+✓ Create DataManager class
+✓ Implement player list loading and caching
+✓ Implement search/filter methods
+✓ Test data fetching independently
+
+Goals:
+- data_manager.get_all_players() returns DataFrame
+- data_manager.search_players(filters) returns filtered DataFrame
+- data_manager.get_player(player_id) returns Player object
+- All data cached in memory after first load
+
+PHASE 3: FIND PLAYER UI (5-7 days)
+-----------------------------------
+✓ Create FindPlayerWidget class
+✓ Implement left panel with filters:
+  - Position tabs (QB, RB, WR, TE, etc.)
+  - Text search box
+  - Age range filter
+  - Team filter
+  - Status filter (Active, Retired, etc.)
+✓ Implement right panel with results table:
+  - Columns: Name, Position, Team, Age, College
+  - Sortable columns
+  - Double-click to open profile
+✓ Connect filters to search functionality
+✓ Add "Clear Filters" and "Search" buttons
+✓ Implement QSplitter for resizable panels
+
+Key Challenge: Making table updates fast
+Solution: Filter cached DataFrame, update table in batches
+
+PHASE 4: BASIC PLAYER PROFILE (5-7 days)
+-----------------------------------------
+✓ Create PlayerProfileWidget class
+✓ Implement player header:
+  - Player photo (placeholder for now)
+  - Name, position, team, age
+  - Basic stats summary
+✓ Create main tabs (Profile, Stats, History)
+✓ Implement Profile → Summary sub-tab:
+  - Personal details sidebar
+  - Key stats section
+  - Career summary
+✓ Implement navigation from Find Player to Profile
+✓ Add back button to return to search
+
+Structure:
+```python
+class PlayerProfileWidget(QWidget):
+    def __init__(self, player: Player):
+        super().__init__()
+        self.player = player
+        self.init_ui()
+    
+    def init_ui(self):
+        layout = QVBoxLayout()
+        
+        # Header
+        header = PlayerHeaderWidget(self.player)
+        layout.addWidget(header)
+        
+        # Tabs
+        tabs = QTabWidget()
+        tabs.addTab(self.create_profile_tab(), "Profile")
+        tabs.addTab(self.create_stats_tab(), "Stats")
+        tabs.addTab(self.create_history_tab(), "History")
+        layout.addWidget(tabs)
+        
+        self.setLayout(layout)
+```
+
+PHASE 5: STATS TABLES (4-6 days)
+---------------------------------
+✓ Create StatsTableModel (QAbstractTableModel)
+✓ Create StatsTableWidget (QTableView + model)
+✓ Implement year-by-year stats display
+✓ Add filter dropdowns (season, team, etc.)
+✓ Add sorting by clicking headers
+✓ Implement career totals row
+✓ Add game log view (date, opponent, stats)
+
+PHASE 6: PROFILE TABS (7-10 days)
+----------------------------------
+✓ Implement Profile → Contract sub-tab
+✓ Implement Profile → Injury History sub-tab
+✓ Implement History → Accomplishments tab:
+  - Awards section
+  - Career highlights
+  - Season-by-season timeline
+✓ Implement Stats → Streaks tab
+
+PHASE 7: POLISH & FEATURES (5-7 days)
+--------------------------------------
+✓ Add player photos (from API or placeholders)
+✓ Add team logos
+✓ Implement rating bars (visual progress bars)
+✓ Add hover tooltips for stats
+✓ Implement favorite players list
+✓ Add export functionality (CSV, PDF)
+✓ Performance optimization for large tables
+✓ Add loading indicators
+✓ Error handling and user feedback
+
+PHASE 8: ADVANCED FEATURES (ongoing)
+-------------------------------------
+□ Player comparison tool
+□ Advanced search (multiple criteria)
+□ Custom stat views
+□ Draft analysis
+□ Team rosters and depth charts
+□ Season and career trends (charts)
+□ News integration
+□ Notes and annotations
+
+TOTAL ESTIMATED TIME:
+- Core functionality: 4-6 weeks (part-time)
+- Polished MVP: 6-8 weeks
+- Production ready: 10-12 weeks
+
+===============================================================================
+9. DETAILED COMPONENT BREAKDOWN
+===============================================================================
+
+COMPONENT 1: FIND PLAYER WIDGET
+--------------------------------
+
+Purpose: Search and filter players, display results
+
+Layout Structure:
+```
+QSplitter (horizontal)
+├── Left Panel (QScrollArea)
+│   └── QWidget (filter container)
+│       ├── QLineEdit (search box)
+│       ├── QTabWidget (position tabs)
+│       ├── QGroupBox (Age Filter)
+│       │   ├── QComboBox (from age)
+│       │   ├── QComboBox (to age)
+│       ├── QGroupBox (Team Filter)
+│       │   └── QComboBox (team dropdown)
+│       ├── QGroupBox (Status)
+│       │   ├── QCheckBox (Active)
+│       │   ├── QCheckBox (Retired)
+│       ├── QPushButton (Clear Filters)
+│       └── QPushButton (Search)
+└── Right Panel (QWidget)
+    ├── QLabel (results count)
+    └── QTableWidget (results)
+```
+
+Implementation Outline:
+```python
+class FindPlayerWidget(QWidget):
+    # Signal emitted when user selects a player
+    playerSelected = Signal(object)  # Player object
+    
+    def __init__(self, data_manager):
+        super().__init__()
+        self.data_manager = data_manager
+        self.current_filters = {}
+        self.init_ui()
+        
+    def init_ui(self):
+        # Create main splitter
+        splitter = QSplitter(Qt.Horizontal)
+        
+        # Left: filters
+        filter_panel = self.create_filter_panel()
+        splitter.addWidget(filter_panel)
+        
+        # Right: results
+        results_panel = self.create_results_panel()
+        splitter.addWidget(results_panel)
+        
+        # Set initial sizes (30% / 70%)
+        splitter.setSizes([300, 900])
+        
+        # Main layout
+        layout = QVBoxLayout()
+        layout.addWidget(splitter)
+        self.setLayout(layout)
+        
+    def create_filter_panel(self):
+        # Scrollable area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        # Container
+        container = QWidget()
+        layout = QVBoxLayout()
+        
+        # Search box
+        search_label = QLabel("Search Players:")
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("Enter player name...")
+        self.search_box.textChanged.connect(self.on_search_changed)
+        layout.addWidget(search_label)
+        layout.addWidget(self.search_box)
+        
+        # Position tabs
+        pos_tabs = QTabWidget()
+        pos_tabs.addTab(QWidget(), "All")
+        pos_tabs.addTab(QWidget(), "QB")
+        pos_tabs.addTab(QWidget(), "RB")
+        pos_tabs.addTab(QWidget(), "WR")
+        pos_tabs.addTab(QWidget(), "TE")
+        pos_tabs.addTab(QWidget(), "OL")
+        pos_tabs.addTab(QWidget(), "DL")
+        pos_tabs.addTab(QWidget(), "LB")
+        pos_tabs.addTab(QWidget(), "DB")
+        pos_tabs.currentChanged.connect(self.on_position_changed)
+        layout.addWidget(pos_tabs)
+        
+        # Age filter
+        age_group = self.create_age_filter()
+        layout.addWidget(age_group)
+        
+        # Team filter
+        team_group = self.create_team_filter()
+        layout.addWidget(team_group)
+        
+        # Status filter
+        status_group = self.create_status_filter()
+        layout.addWidget(status_group)
+        
+        # Spacer to push buttons to bottom
+        layout.addStretch()
+        
+        # Action buttons
+        btn_layout = QHBoxLayout()
+        clear_btn = QPushButton("Clear Filters")
+        clear_btn.clicked.connect(self.clear_filters)
+        search_btn = QPushButton("Search")
+        search_btn.setObjectName("primaryButton")
+        search_btn.clicked.connect(self.perform_search)
+        btn_layout.addWidget(clear_btn)
+        btn_layout.addWidget(search_btn)
+        layout.addLayout(btn_layout)
+        
+        container.setLayout(layout)
+        scroll.setWidget(container)
+        return scroll
+        
+    def create_age_filter(self):
+        group = QGroupBox("Age Range")
+        layout = QHBoxLayout()
+        
+        self.age_from = QSpinBox()
+        self.age_from.setRange(0, 50)
+        self.age_from.setValue(0)
+        self.age_from.setPrefix("From: ")
+        
+        self.age_to = QSpinBox()
+        self.age_to.setRange(0, 50)
+        self.age_to.setValue(50)
+        self.age_to.setPrefix("To: ")
+        
+        layout.addWidget(self.age_from)
+        layout.addWidget(self.age_to)
+        group.setLayout(layout)
+        return group
+        
+    def create_team_filter(self):
+        group = QGroupBox("Team")
+        layout = QVBoxLayout()
+        
+        self.team_combo = QComboBox()
+        self.team_combo.addItem("All Teams")
+        # Populate with NFL teams
+        teams = ["ARI", "ATL", "BAL", "BUF", "CAR", "CHI", "CIN", 
+                 "CLE", "DAL", "DEN", "DET", "GB", "HOU", "IND", 
+                 "JAX", "KC", "LAC", "LAR", "LV", "MIA", "MIN", 
+                 "NE", "NO", "NYG", "NYJ", "PHI", "PIT", "SEA", 
+                 "SF", "TB", "TEN", "WAS"]
+        self.team_combo.addItems(teams)
+        
+        layout.addWidget(self.team_combo)
+        group.setLayout(layout)
+        return group
+        
+    def create_status_filter(self):
+        group = QGroupBox("Player Status")
+        layout = QVBoxLayout()
+        
+        self.active_check = QCheckBox("Active Players Only")
+        self.active_check.setChecked(True)
+        
+        layout.addWidget(self.active_check)
+        group.setLayout(layout)
+        return group
+        
+    def create_results_panel(self):
+        widget = QWidget()
+        layout = QVBoxLayout()
+        
+        # Results count
+        self.results_label = QLabel("Results: 0 players")
+        layout.addWidget(self.results_label)
+        
+        # Table
+        self.results_table = QTableWidget()
+        self.results_table.setColumnCount(6)
+        self.results_table.setHorizontalHeaderLabels([
+            "Name", "Position", "Team", "Age", "Height", "College"
+        ])
+        self.results_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.results_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.results_table.doubleClicked.connect(self.on_player_double_clicked)
+        self.results_table.setSortingEnabled(True)
+        
+        # Stretch columns
+        header = self.results_table.horizontalHeader()
+        header.setStretchLastSection(True)
+        
+        layout.addWidget(self.results_table)
+        widget.setLayout(layout)
+        return widget
+        
+    def on_search_changed(self, text):
+        # Real-time search as user types
+        if len(text) >= 2:  # Wait for at least 2 characters
+            self.perform_search()
+        elif len(text) == 0:
+            self.perform_search()  # Show all when cleared
+            
+    def on_position_changed(self, index):
+        self.perform_search()
+        
+    def perform_search(self):
+        # Gather filter values
+        filters = {
+            'name': self.search_box.text(),
+            'position': self.get_selected_position(),
+            'team': self.team_combo.currentText() if self.team_combo.currentText() != "All Teams" else None,
+            'age_min': self.age_from.value() if self.age_from.value() > 0 else None,
+            'age_max': self.age_to.value() if self.age_to.value() < 50 else None,
+            'active_only': self.active_check.isChecked()
+        }
+        
+        # Query data manager
+        results = self.data_manager.search_players(**filters)
+        
+        # Update table
+        self.update_results_table(results)
+        
+    def update_results_table(self, results_df):
+        # results_df is a Polars DataFrame
+        self.results_table.setRowCount(0)  # Clear
+        
+        if results_df is None or results_df.height == 0:
+            self.results_label.setText("Results: 0 players")
+            return
+        
+        # Update count
+        count = results_df.height
+        self.results_label.setText(f"Results: {count} players")
+        
+        # Populate table
+        self.results_table.setRowCount(count)
+        for i, row in enumerate(results_df.iter_rows(named=True)):
+            self.results_table.setItem(i, 0, QTableWidgetItem(row.get('full_name', '')))
+            self.results_table.setItem(i, 1, QTableWidgetItem(row.get('position', '')))
+            self.results_table.setItem(i, 2, QTableWidgetItem(row.get('latest_team', '')))
+            self.results_table.setItem(i, 3, QTableWidgetItem(str(row.get('age', ''))))
+            self.results_table.setItem(i, 4, QTableWidgetItem(str(row.get('height', ''))))
+            self.results_table.setItem(i, 5, QTableWidgetItem(row.get('college', '')))
+            
+            # Store player ID in hidden UserRole data
+            name_item = self.results_table.item(i, 0)
+            name_item.setData(Qt.UserRole, row.get('gsis_id'))
+        
+    def on_player_double_clicked(self, index):
+        # Get player ID from clicked row
+        row = index.row()
+        name_item = self.results_table.item(row, 0)
+        player_id = name_item.data(Qt.UserRole)
+        
+        # Load full player data
+        player = self.data_manager.get_player(player_id)
+        
+        # Emit signal
+        self.playerSelected.emit(player)
+        
+    def clear_filters(self):
+        self.search_box.clear()
+        self.age_from.setValue(0)
+        self.age_to.setValue(50)
+        self.team_combo.setCurrentIndex(0)
+        self.active_check.setChecked(True)
+        self.perform_search()
+```
+
+COMPONENT 2: PLAYER HEADER WIDGET
+----------------------------------
+
+Purpose: Reusable player info header
+
+```python
+class PlayerHeaderWidget(QWidget):
+    def __init__(self, player: Player):
+        super().__init__()
+        self.player = player
+        self.init_ui()
+        
+    def init_ui(self):
+        layout = QHBoxLayout()
+        
+        # Player photo
+        photo_label = QLabel()
+        pixmap = self.load_player_photo()
+        photo_label.setPixmap(pixmap)
+        photo_label.setFixedSize(100, 100)
+        layout.addWidget(photo_label)
+        
+        # Player info
+        info_layout = QVBoxLayout()
+        
+        # Name (large)
+        name_label = QLabel(self.player.profile.full_name)
+        name_label.setObjectName("headerLabel")
+        font = name_label.font()
+        font.setPointSize(20)
+        font.setBold(True)
+        name_label.setFont(font)
+        info_layout.addWidget(name_label)
+        
+        # Position, Team, Age
+        detail_text = f"{self.player.profile.position} | "
+        detail_text += f"Age {self.calculate_age()} | "
+        detail_text += f"{self.player.profile.height}\" {self.player.profile.weight} lbs"
+        
+        details_label = QLabel(detail_text)
+        details_label.setObjectName("secondaryLabel")
+        info_layout.addWidget(details_label)
+        
+        # College, Draft
+        draft_text = f"College: {self.player.profile.college or 'Unknown'}"
+        if self.player.profile.draft_year:
+            draft_text += f" | Draft: {self.player.profile.draft_year} Round {self.player.profile.draft_round}"
+        draft_label = QLabel(draft_text)
+        info_layout.addWidget(draft_label)
+        
+        layout.addLayout(info_layout)
+        layout.addStretch()
+        
+        self.setLayout(layout)
+        
+    def load_player_photo(self):
+        # Try to load from file or use placeholder
+        # For now, return placeholder
+        pixmap = QPixmap(100, 100)
+        pixmap.fill(Qt.gray)
+        return pixmap
+        
+    def calculate_age(self):
+        if self.player.profile.birth_date:
+            from datetime import date
+            today = date.today()
+            bd = self.player.profile.birth_date
+            return today.year - bd.year - ((today.month, today.day) < (bd.month, bd.day))
+        return "Unknown"
+```
+
+COMPONENT 3: STATS TABLE WITH MODEL
+-----------------------------------
+
+Purpose: High-performance stats table for large datasets
+
+```python
+from PySide6.QtCore import QAbstractTableModel, Qt
+
+class StatsTableModel(QAbstractTableModel):
+    def __init__(self, df=None):
+        super().__init__()
+        self._df = df
+        self._headers = df.columns if df is not None else []
+        
+    def rowCount(self, parent=None):
+        return self._df.height if self._df is not None else 0
+        
+    def columnCount(self, parent=None):
+        return len(self._headers) if self._df is not None else 0
+        
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid() or self._df is None:
+            return None
+            
+        if role == Qt.DisplayRole:
+            value = self._df.row(index.row())[index.column()]
+            return str(value) if value is not None else ""
+            
+        return None
+        
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role == Qt.DisplayRole:
+            if orientation == Qt.Horizontal:
+                return self._headers[section]
+            else:
+                return str(section + 1)
+        return None
+        
+    def update_data(self, df):
+        self.beginResetModel()
+        self._df = df
+        self._headers = df.columns if df is not None else []
+        self.endResetModel()
+
+class StatsTableWidget(QWidget):
+    def __init__(self, player: Player):
+        super().__init__()
+        self.player = player
+        self.init_ui()
+        
+    def init_ui(self):
+        layout = QVBoxLayout()
+        
+        # Filters
+        filter_layout = QHBoxLayout()
+        
+        self.season_combo = QComboBox()
+        self.season_combo.addItem("All Seasons")
+        # Add seasons from player's career
+        filter_layout.addWidget(QLabel("Season:"))
+        filter_layout.addWidget(self.season_combo)
+        
+        self.stat_type_combo = QComboBox()
+        self.stat_type_combo.addItems(["Career Stats", "Game Log", "Splits"])
+        filter_layout.addWidget(QLabel("View:"))
+        filter_layout.addWidget(self.stat_type_combo)
+        
+        filter_layout.addStretch()
+        layout.addLayout(filter_layout)
+        
+        # Table
+        self.table_view = QTableView()
+        self.model = StatsTableModel()
+        self.table_view.setModel(self.model)
+        self.table_view.setAlternatingRowColors(True)
+        self.table_view.setSortingEnabled(True)
+        layout.addWidget(self.table_view)
+        
+        self.setLayout(layout)
+        
+        # Load initial data
+        self.load_stats()
+        
+    def load_stats(self):
+        # Fetch stats from player object
+        stats_df = self.player.fetch_stats(seasons=True)
+        
+        # Update model
+        self.model.update_data(stats_df)
+        
+        # Resize columns
+        self.table_view.resizeColumnsToContents()
+```
+
+COMPONENT 4: RATING BAR WIDGET
+-------------------------------
+
+Purpose: Visual rating bars like OOTP's colored progress bars
+
+```python
+class RatingBarWidget(QWidget):
+    def __init__(self, label, value, max_value=100, color=None):
+        super().__init__()
+        self.label = label
+        self.value = value
+        self.max_value = max_value
+        self.color = color or self.get_color_for_value(value, max_value)
+        self.init_ui()
+        
+    def init_ui(self):
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 2, 0, 2)
+        
+        # Label
+        label = QLabel(self.label)
+        label.setFixedWidth(150)
+        layout.addWidget(label)
+        
+        # Progress bar
+        bar = QProgressBar()
+        bar.setRange(0, self.max_value)
+        bar.setValue(self.value)
+        bar.setTextVisible(True)
+        bar.setFormat(f"{self.value} / {self.max_value}")
+        
+        # Set color with stylesheet
+        bar.setStyleSheet(f"""
+            QProgressBar {{
+                border: 1px solid #555555;
+                border-radius: 3px;
+                text-align: center;
+                background-color: #404040;
+            }}
+            QProgressBar::chunk {{
+                background-color: {self.color};
+                border-radius: 2px;
+            }}
+        """)
+        
+        layout.addWidget(bar)
+        self.setLayout(layout)
+        
+    def get_color_for_value(self, value, max_value):
+        # Color based on percentage
+        pct = value / max_value
+        if pct >= 0.8:
+            return "#4CAF50"  # Green
+        elif pct >= 0.6:
+            return "#2A8CA5"  # Teal
+        elif pct >= 0.4:
+            return "#FF9800"  # Orange
+        else:
+            return "#F44336"  # Red
+```
+
+===============================================================================
+10. CODE STRUCTURE RECOMMENDATIONS
+===============================================================================
+
+COMPLETE FILE STRUCTURE WITH EXAMPLES:
+---------------------------------------
+
+1. main.py - Application Entry Point
+=====================================
+
+```python
+import sys
+from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from ui.main_window import MainWindow
+
+def main():
+    # Enable high DPI scaling
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
+    
+    app = QApplication(sys.argv)
+    app.setApplicationName("NFL Player Explorer")
+    app.setOrganizationName("YourName")
+    
+    # Load stylesheet
+    with open("resources/styles/dark_theme.qss", "r") as f:
+        app.setStyleSheet(f.read())
+    
+    # Create and show main window
+    window = MainWindow()
+    window.show()
+    
+    sys.exit(app.exec())
+
+if __name__ == "__main__":
+    main()
+```
+
+2. ui/main_window.py - Main Application Window
+===============================================
+
+```python
+from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, 
+                                QStackedWidget, QPushButton, QHBoxLayout)
+from PySide6.QtCore import Qt
+from ui.find_player import FindPlayerWidget
+from ui.player_profile import PlayerProfileWidget
+from data.manager import DataManager
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.data_manager = DataManager()
+        self.init_ui()
+        
+    def init_ui(self):
+        self.setWindowTitle("NFL Player Explorer")
+        self.setMinimumSize(1200, 800)
+        
+        # Central widget with stacked layout
+        central = QWidget()
+        self.setCentralWidget(central)
+        
+        layout = QVBoxLayout()
+        central.setLayout(layout)
+        
+        # Navigation bar
+        nav_bar = self.create_nav_bar()
+        layout.addWidget(nav_bar)
+        
+        # Stacked widget for different views
+        self.stack = QStackedWidget()
+        
+        # Add views
+        self.find_player_widget = FindPlayerWidget(self.data_manager)
+        self.find_player_widget.playerSelected.connect(self.show_player_profile)
+        self.stack.addWidget(self.find_player_widget)
+        
+        layout.addWidget(self.stack)
+        
+        # Status bar
+        self.statusBar().showMessage("Ready")
+        
+    def create_nav_bar(self):
+        nav = QWidget()
+        layout = QHBoxLayout()
+        
+        self.back_btn = QPushButton("← Back")
+        self.back_btn.clicked.connect(self.go_back)
+        self.back_btn.setEnabled(False)
+        layout.addWidget(self.back_btn)
+        
+        layout.addStretch()
+        
+        nav.setLayout(layout)
+        return nav
+        
+    def show_player_profile(self, player):
+        # Create profile widget
+        profile = PlayerProfileWidget(player, self.data_manager)
+        
+        # Add to stack
+        self.stack.addWidget(profile)
+        self.stack.setCurrentWidget(profile)
+        
+        # Enable back button
+        self.back_btn.setEnabled(True)
+        
+    def go_back(self):
+        # Go back to find player
+        self.stack.setCurrentIndex(0)
+        self.back_btn.setEnabled(False)
+```
+
+3. data/manager.py - Data Management Layer
+===========================================
+
+```python
+import polars as pl
+from typing import Optional, List, Dict, Any
+from data.player import Player, PlayerDataSource
+from functools import lru_cache
+
+class DataManager:
+    """Centralized data access and caching."""
+    
+    def __init__(self):
+        self._players_cache = None
+        self._session_cache = {}
+        
+    def get_all_players(self) -> pl.DataFrame:
+        """Load and cache all players."""
+        if self._players_cache is None:
+            print("Loading player database...")
+            self._players_cache = PlayerDataSource.combined()
+            print(f"Loaded {self._players_cache.height} players")
+        return self._players_cache
+        
+    def search_players(
+        self, 
+        name: str = "", 
+        position: Optional[str] = None,
+        team: Optional[str] = None,
+        age_min: Optional[int] = None,
+        age_max: Optional[int] = None,
+        active_only: bool = False
+    ) -> pl.DataFrame:
+        """Filter players by criteria."""
+        df = self.get_all_players()
+        
+        # Name filter
+        if name:
+            name_lower = name.lower()
+            df = df.filter(
+                pl.col('full_name').fill_null('').str.to_lowercase().str.contains(name_lower) |
+                pl.col('display_name').fill_null('').str.to_lowercase().str.contains(name_lower)
+            )
+        
+        # Position filter
+        if position and position != "All":
+            df = df.filter(pl.col('position').fill_null('') == position)
+        
+        # Team filter
+        if team:
+            df = df.filter(pl.col('latest_team').fill_null('') == team)
+        
+        # Age filter (requires calculating from birth_date)
+        # Simplified version - you'd need proper date handling
+        
+        # Active filter
+        if active_only:
+            df = df.filter(pl.col('status') == 'ACT')
+        
+        return df
+        
+    def get_player(self, player_id: str) -> Player:
+        """Get Player object by ID, with caching."""
+        if player_id in self._session_cache:
+            return self._session_cache[player_id]
+        
+        # Find player in cache
+        df = self.get_all_players()
+        player_row = df.filter(pl.col('gsis_id') == player_id)
+        
+        if player_row.height == 0:
+            raise ValueError(f"Player {player_id} not found")
+        
+        # Get player name
+        name = player_row.row(0, named=True)['full_name']
+        
+        # Create Player object
+        player = Player(name=name)
+        
+        # Cache it
+        self._session_cache[player_id] = player
+        
+        return player
+```
+
+BEST PRACTICES:
+---------------
+
+1. NAMING CONVENTIONS:
+   - Classes: PascalCase (PlayerProfileWidget)
+   - Functions/methods: snake_case (get_player_stats)
+   - Private methods: _leading_underscore
+   - Constants: UPPER_SNAKE_CASE (MAX_RESULTS)
+
+2. FILE ORGANIZATION:
+   - One major widget per file
+   - Group related widgets in subdirectories
+   - Keep data and UI separate
+
+3. DOCUMENTATION:
+   - Docstrings for all public methods
+   - Comments for complex logic
+   - Type hints for clarity
+
+4. ERROR HANDLING:
+   ```python
+   try:
+       player = self.data_manager.get_player(player_id)
+   except ValueError as e:
+       QMessageBox.warning(self, "Error", str(e))
+       return
+   except ConnectionError:
+       QMessageBox.warning(self, "Network Error", 
+                          "Could not load player data. Check internet connection.")
+       return
+   ```
+
+5. THREADING FOR LONG OPERATIONS:
+   ```python
+   from PySide6.QtCore import QThread, Signal
+   
+   class DataLoadThread(QThread):
+       finished = Signal(object)
+       error = Signal(str)
+       
+       def __init__(self, data_manager, player_id):
+           super().__init__()
+           self.data_manager = data_manager
+           self.player_id = player_id
+           
+       def run(self):
+           try:
+               player = self.data_manager.get_player(self.player_id)
+               stats = player.fetch_stats(seasons=True)
+               self.finished.emit(stats)
+           except Exception as e:
+               self.error.emit(str(e))
+   
+   # Usage:
+   thread = DataLoadThread(self.data_manager, player_id)
+   thread.finished.connect(self.on_stats_loaded)
+   thread.error.connect(self.on_error)
+   thread.start()
+   
+   # Show loading indicator
+   self.loading_label.show()
+   ```
+
+===============================================================================
+11. COMMON PITFALLS & SOLUTIONS
+===============================================================================
+
+PITFALL 1: UI Freezing During Data Load
+SOLUTION: Use QThread or async loading with progress indicators
+
+PITFALL 2: Table Performance with Large Datasets
+SOLUTION: Use QTableView with custom model instead of QTableWidget
+
+PITFALL 3: Memory Leaks
+SOLUTION: Properly delete old widgets, use weak references, clear caches
+
+PITFALL 4: Inconsistent Styling
+SOLUTION: Use QSS stylesheet, set object names for specific styling
+
+PITFALL 5: Hard-Coded Values
+SOLUTION: Use constants, configuration files, or database
+
+PITFALL 6: Signal/Slot Connection Errors
+SOLUTION: Check signatures match, use new-style connections, debug with print statements
+
+PITFALL 7: Layout Issues
+SOLUTION: Use spacers, set minimum sizes, test with different window sizes
+
+PITFALL 8: Case Sensitivity in Searches
+SOLUTION: Always convert to lowercase for comparison
+
+PITFALL 9: Missing Data Handling
+SOLUTION: Use fill_null(), provide defaults, show placeholders
+
+PITFALL 10: Not Testing Edge Cases
+SOLUTION: Test with missing data, large datasets, slow connections
+
+===============================================================================
+12. NEXT STEPS & RESOURCES
+===============================================================================
+
+IMMEDIATE NEXT STEPS:
+----------------------
+
+1. Set up project structure
+2. Install PySide6 and dependencies
+3. Create basic main window with dark theme
+4. Implement DataManager with player loading
+5. Build Find Player search page
+6. Test search functionality thoroughly
+7. Create basic player profile page
+8. Add navigation between pages
+9. Implement stats tables
+10. Polish and add features iteratively
+
+LEARNING RESOURCES:
+-------------------
+
+PYSIDE6 DOCUMENTATION:
+- Official Docs: https://doc.qt.io/qtforpython/
+- Qt Widgets: https://doc.qt.io/qt-6/qtwidgets-index.html
+- Examples: https://doc.qt.io/qtforpython/examples/index.html
+
+TUTORIALS:
+- PySide6 Tutorial: https://realpython.com/python-pyqt-gui-calculator/
+- Qt Designer: https://www.pythonguis.com/tutorials/pyqt-designer/
+- Model/View: https://doc.qt.io/qt-6/model-view-programming.html
+
+NFL DATA:
+- nflreadpy: https://github.com/nflverse/nflreadpy
+- nflverse data: https://github.com/nflverse/nfldata
+- Polars: https://pola-rs.github.io/polars/
+
+DESIGN INSPIRATION:
+- Your OOTP screenshots (primary reference)
+- Pro Football Reference layout
+- ESPN player pages
+- Sleeper app design
+
+TOOLS:
+- Qt Designer: Visual UI editor (included with PySide6)
+- Qt Style Sheet Inspector: Debug styling
+- Polars CLI: Test data queries
+
+DEBUGGING TIPS:
+---------------
+
+1. Print statements in signal handlers to trace flow
+2. Use Qt Creator to inspect widget hierarchy
+3. Check console for Qt warnings
+4. Test small pieces independently
+5. Use breakpoints in IDE
+
+COMMUNITY:
+----------
+
+- Stack Overflow: Qt and PySide6 tags
+- r/Python, r/PyQt subreddits
+- Qt Discord/Forums
+- GitHub Issues for nflreadpy
+
+===============================================================================
+FINAL RECOMMENDATIONS
+===============================================================================
+
+START SIMPLE:
+- Build Find Player page first
+- Get one player profile working
+- Then expand to all features
+- Don't try to do everything at once
+
+ITERATE:
+- Get basic version working
+- Show it to users (yourself!)
+- Identify pain points
+- Refine and improve
+
+STAY ORGANIZED:
+- Keep data and UI separate
+- Use version control (git)
+- Comment your code
+- Refactor as you learn
+
+HAVE FUN:
+- This is a great learning project
+- You'll build real desktop app skills
+- The end result will be impressive
+- Enjoy the process!
+
+===============================================================================
+ESTIMATED TIMELINE FOR BEGINNER
+===============================================================================
+
+Week 1-2: Setup & Learning
+- Install tools
+- Complete PySide6 tutorial
+- Build simple test apps
+- Understand signals/slots
+
+Week 3-4: Find Player Page
+- Implement search interface
+- Connect to data layer
+- Make it look like OOTP
+- Test thoroughly
+
+Week 5-6: Player Profile Basics
+- Build header widget
+- Implement tab navigation
+- Add basic information display
+- Create stats table framework
+
+Week 7-8: Stats & History
+- Implement all stat views
+- Add game logs
+- Build accomplishments page
+- Connect everything together
+
+Week 9-10: Polish
+- Refine styling
+- Add loading indicators
+- Handle errors gracefully
+- Performance optimization
+
+Week 11-12: Advanced Features
+- Player comparison
+- Export functionality
+- Favorites/bookmarks
+- Any custom features you want
+
+TOTAL: 3 months to polished v1.0 (working part-time)
+
+===============================================================================
+CONCLUSION
+===============================================================================
+
+You now have a comprehensive guide to building your NFL player UI application.
+The OOTP interface is well-designed and can be successfully recreated using
+PySide6. Your existing Player class with nflreadpy provides an excellent
+foundation for the data layer.
+
+Key takeaways:
+1. Use PySide6 for native performance and flexibility
+2. Separate data management from UI rendering
+3. Build modular, reusable widgets
+4. Match OOTP's dark theme with teal accents
+5. Use signals/slots for clean communication
+6. Start simple, iterate, and expand
+
+Good luck with your project! This will be an impressive application when
+complete, and you'll learn valuable skills along the way.
+
+===============================================================================
+

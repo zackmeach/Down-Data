@@ -1,0 +1,160 @@
+OOTPB 26 NFL Interface Plan
+================================
+
+1. Core Goals & Mindset
+-----------------------
+- Prioritise the `Find a Player` screen as the temporary landing view so every other panel can reuse its player-selection logic.
+- Preserve the Out of the Park Baseball (OOTP) density: dark chrome, thin dividers, data-dense tables, and a layout grounded in high-contrast panels.
+- Keep the build novice-friendly by separating data access, transformation, and presentation into small, well-named modules.
+- Minimise local disks hits by streaming data from nflverse/nflreadpy on demand and caching only the bare minimum in memory.
+
+2. Recommended Stack & Project Skeleton
+---------------------------------------
+- GUI toolkit: `PySide6` (official Qt bindings, LGPL, strong community). `PyQt6` is fine if you already own a Riverbank licence; the usage pattern is identical.
+- Structure the repo as:
+  - `app/` – Qt widgets, view models, resources (fonts, icons, QSS theme).
+  - `core/` – domain objects (`Player`, `Team`, `SeasonStats`) and adapters wrapping nflreadpy responses.
+  - `services/` – data services (player search, stats fetcher, caching helpers), each exposing async-friendly APIs.
+  - `qss/` – Qt Style Sheets defining colors, spacing tokens, reusable class selectors.
+  - `main.py` – entry point that wires dependency injection, loads the theme, and launches the root window.
+- Use an MVVM-inspired pattern:
+  - *Model* – `Player` dataclass (could reuse your existing one), plus typed records for contract data, injuries, streaks, etc.
+  - *ViewModel* – thin controller objects that translate Qt signals into service calls and expose reactive properties (via `Signal`/`Property` or `QAbstractListModel`).
+  - *View* – Qt widgets that bind to view models (e.g., `PlayerSearchPanel` listening for `resultsChanged` signals).
+
+3. Data Access Philosophy
+-------------------------
+- Prefer nflreadpy for live datasets (players, stats, schedules). It already handles CDN-hosted Parquet/CSV downloads without storing raw files permanently.
+- Centralise network calls in a `DataGateway` that offers:
+  - `async search_players(name:str, team:str|None, year:int|None) -> List[PlayerSummary]`
+  - `async load_player_profile(gsis_id:str) -> PlayerProfile`
+  - `async load_stats(gsis_id:str, seasons:Iterable[int], view:'summary|gamelog|streaks')`
+  - `async load_accolades(gsis_id:str)`
+- Use `asyncio` or Qt’s `QThreadPool` + `QRunnable` to keep the UI responsive while hitting the network.
+- Cache in memory per session: player master table (already small), most recent stats payload, and shared team dictionary. Avoid writing to disk unless exporting.
+- When nflreadpy lacks an endpoint (e.g., contracts), note third-party APIs: OverTheCap, Spotrac (paid), or compiled CSV references. Build adapters later; begin with placeholders to unblock the UI shell.
+
+4. Visual Language & Tokens
+---------------------------
+- Dominant colors sampled from references:
+  - `#323232` – main background chrome.
+  - `#2f2f2f` / `#282828` – panel backgrounds and recessed surfaces.
+  - `#04548f` – accent teal/blue for highlights (e.g., selected tabs, action buttons).
+  - `#edf5f7` – light highlight for headers and alternating table rows.
+  - Text should rely on near-white (`#f3f3f3`) and mid-gray (`#c0c0c0`).
+- Typography: consider `Roboto Condensed`, `IBM Plex Sans`, or Qt default `Segoe UI`. Use 13–14px base, 16px for headers, 11px for table detail rows.
+- Terminology for UI elements:
+  - *Navigation rail* – vertical button stack on the far left.
+  - *Command header* – the slim top bar with the drop-downs and filter controls.
+  - *Detail pane* – the large central content area.
+  - *Sidebar summary card* – right-aligned column summarising key stats/bio.
+  - *Data grid* – primary table component (use `QTableView` backed by a custom `QAbstractTableModel`).
+  - *Section tabs* – segmented buttons that switch between profile, stats, history subviews.
+- Layout rhythm: 8px base spacing, 16px padding around panels, 1px separators for grid lines.
+- Apply QSS classes (e.g., `.panel`, `.table-header`, `.nav-button`) to ensure consistent coloring.
+
+5. Page-by-Page Notes
+---------------------
+
+5.1 Find a Player (temporary landing view)
+- Layout inference: left navigation rail (~24% width) with a scrollable list, mid-column search results (~60%), right summary card (~16%).
+- Components:
+  - Search form (name input, team dropdown, season filter toggles). Use `QLineEdit`, `QComboBox`, `QCheckBox` arranged in a `QFormLayout`.
+  - Result list: consider a `QTableView` with columns for name, position, team, years active. Include quick action buttons (“View Profile”).
+  - Right summary: `QFrame` containing `QLabels` for headshot, vitals, and quick stats pulled from `PlayerProfile`.
+- Behavior:
+  - Debounce search input (250–300 ms) and call `search_players` asynchronously.
+  - Selecting a row updates the summary card and enables navigation buttons to profile/stats views.
+  - Provide “Filters” collapsible panel to mimic OOTP’s multi-criteria search (position, draft year, etc.).
+- Data: begin with your existing `PlayerFinder` logic. Wrap it inside the view model to decouple UI from data.
+
+5.2 Player Profile – Summary
+- Visual: two-column layout: left column with portrait + bio blocks, right column with tabular breakdowns (ratings, traits, recent performance).
+- Widgets:
+  - `QStackedWidget` for sub-tabs (Summary, Contract, Injury, History) so the outer shell stays identical.
+  - Bio blocks using `QGridLayout` to keep labels aligned (Name, Birthdate, College, Draft Info).
+  - Stats snippet tables can reuse the `DataGrid` model but with limited rows.
+- Data: rely on `PlayerProfile` plus aggregated stats (career totals). Precompute derived values (e.g., “Year Drafted” text) in the view model.
+
+5.3 Player Profile – Contract
+- Layout: same frame as summary but central table shows contract history.
+- Data requirements: OverTheCap API or manual dataset mapping `gsis_id -> contract terms`. For MVP, simulate with placeholder rows to verify UI.
+- Implementation: `QTableView` with multi-column header (Year, Team, Salary, Bonus, Cap Hit). Provide summary badges at top (Total Value, Remaining Years).
+
+5.4 Player Profile – Injury History
+- Layout: vertical timeline table with severity icons.
+- Data: nflverse lacks injuries; consider Sports Injury Tracker or manual dataset. Provide stub service returning example entries.
+- Use `QTreeView` or `QTableView` with icon delegates for injury type. Add filter chips for “Show Major Only”, “Show IR Stints”.
+
+5.5 Player Stats – Stats (Season Totals)
+- Layout: main data grid covering most of the screen, split by offensive/defensive categories.
+- Implementation: create modular table models (PassingStatsModel, DefensiveStatsModel) that map Polars/Pandas DataFrames into Qt roles.
+- Add toolbar (top) with drop-downs for Season Range, Season Type (REG/POST), and toggle for NextGen metrics.
+- Provide summary row at bottom (use `QHeaderView::setStretchLastSection(true)` and optional `QTableWidget` footers).
+
+5.6 Player Stats – Game Log
+- Layout: table with one row per game (Date, Opponent, Result, key stats). Add small chart preview on the right (use `QtCharts` or embed `matplotlib` canvas).
+- Data: `Player.fetch_stats(seasons=selected)` filtered by week; consider caching per season.
+- Features: column grouping to mimic OOTP’s multi-line headers (e.g., Passing | Attempts, Completions, Yards). Achievable with a custom `QHeaderView`.
+
+5.7 Player Stats – Streaks
+- Layout: left column for streak definitions (e.g., consecutive games with TD), right column detail table.
+- Data: compute streaks on the fly using Polars groupby operations when stats load. Expose precomputed list to the view model.
+- Visual: highlight active streaks in accent color; provide context text (start date, teams).
+
+5.8 Player History – Accomplishments
+- Layout: timeline-style list sorted descending by year. Use `QListView` with a delegate to render badges/emblems.
+- Data: combine nflverse awards (limited) with manual dataset (Pro Bowls, All-Pro, records). Provide stub data now, add connectors later.
+- Include filter tabs (All, League Awards, Team Awards, Records) as `QTabBar` above the list.
+
+6. Implementation Roadmap (Novice-Friendly)
+------------------------------------------
+1. **Set up environment** – `python -m venv .venv`, install `PySide6`, `polars`, `nflreadpy`.
+2. **Bootstrap window** – create `MainWindow` (`QMainWindow`), apply dark theme via QSS, stub central widget.
+3. **Navigation rail** – implement `NavigationPanel` with `QToolButton`s for Find Player, Profile, Stats, History. Wire signals but keep others disabled.
+4. **Player service** – wrap current `Player` finder into async-compatible class returning lightweight DTOs (dicts or dataclasses).
+5. **Find Player view model** – manage search term, selected filters, results list, selected player. Expose Qt signals (`resultsChanged`, `selectionChanged`).
+6. **Bind view** – build `PlayerSearchView` with search form, `QTableView` for results (simple `QStandardItemModel` initially), summary card on the right.
+7. **Connect selection** – when a row is activated, load profile details and update summary card; enable profile/stats navigation buttons.
+8. **Persist theme tokens** – extract colors, fonts into QSS variables; ensure tables have alternating row colors and 1px grid lines like OOTP.
+9. **Extend gradually** – add `PlayerProfileView` once search is stable, reuse the same view model pattern for stats and history pages.
+
+7. Terminology Cheat Sheet
+--------------------------
+- Navigation Rail – vertical button stack for primary sections.
+- Panel / Surface – framed area with uniform background (`QFrame` + `setObjectName('panel')`).
+- Command Header – horizontal strip of filters/actions at top of a panel.
+- Data Grid / Table View – `QTableView` or `QTreeView` showing tabular data.
+- Detail Card – compact summary on the side (photo, key numbers).
+- Segmented Control – group of connected buttons (`QButtonGroup`) toggling between modes (e.g., Stats | Game Log | Streaks).
+- Breadcrumb – textual indicator of current player/context (e.g., “Mahomes ▸ Profile ▸ Summary”).
+- Modal Flyout – transient overlay for editing filters (implemented via `QDialog`).
+
+8. Styling Tips in Qt
+---------------------
+- Define a base QSS file:
+  - `QMainWindow { background-color: #232323; }`
+  - `.panel { background-color: #2f2f2f; border: 1px solid #3b3b3b; border-radius: 4px; }`
+  - `QTableView { gridline-color: #3b3b3b; color: #f3f3f3; selection-background-color: #04548f; }`
+- Use `QPalette` overrides for global text colors to ensure readability on dark backgrounds.
+- Leverage `QFontDatabase.addApplicationFont` to ship fonts locally without installing system-wide.
+- Iconography: create monochrome SVGs (white) and tint via `QIcon::addPixmap` or CSS `image` filters.
+- Consider `QtCharts` or `QCustomPlot` sparingly; OOTP leans heavily on tables rather than charts.
+
+9. Data Minimisation Practices
+------------------------------
+- Avoid persisting nflverse datasets: each nflreadpy call streams compressed files and can be discarded once the DataFrame is built.
+- Maintain an in-memory LRU cache (e.g., `functools.lru_cache` or custom dict limited to recent players) for stats to prevent repeated downloads.
+- Offer optional “Export to CSV” buttons; only write when user explicitly requests data.
+- If you later need offline mode, add a `CachePolicy` enum (STREAM, CACHE_SESSION, CACHE_DISK) so behaviour stays configurable.
+
+10. Next Steps & Validation
+---------------------------
+- Build the Find Player workflow end-to-end (search → select → summary) before tackling profile sub-tabs.
+- Create mock services returning hard-coded contract/injury/accomplishment data so UI work isn’t blocked.
+- Once UI shell matches OOTP visually, progressively swap mocks for real APIs.
+- Add lightweight logging (using Python’s `logging`) to capture API latency and failures.
+- Write smoke tests for the data services (ensuring nflreadpy endpoints return expected columns).
+
+This plan should give you a vocabulary and roadmap to build an OOTP-style desktop app that streams NFL data on demand without overwhelming local storage. Iterate on one page at a time, keep services thin, and rely on Qt’s styling system to mirror the reference visuals.
+
