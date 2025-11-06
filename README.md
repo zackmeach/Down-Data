@@ -2,14 +2,14 @@
 
 ## Overview
 
-This project is now centered on a single, powerful `Player` object and a minimal, Rich-powered CLI in `main.py`. It’s designed as a foundation for an OOTP-style NFL data explorer, keeping only what’s necessary:
+Down-Data is evolving into a desktop NFL data explorer inspired by the Out of the Park interface flow. The project now ships with a PySide6-powered shell that focuses on the player search experience, plus a clean separation between UI, backend services, and the original `Player` domain object.
 
-- `player.py`: High-level API for player profile and stats (1999+), NextGen stats (2016+), and helpers.
-- `main.py`: Interactive terminal explorer for searching players, previewing stats, and exporting a master CSV.
-- `data/`: Your data workspace (kept intact, including exports and raw data areas).
-- `agentic-feedback/` and `ootp-images/`: Preserved for notes and UI inspiration.
-
-Removed legacy components include the `stats/` folder and `stats_engine.py`.
+- `main.py`: Launches the Qt desktop client (player search is the initial landing view).
+- `down_data/core/player.py`: Home of the rich `Player` object, unchanged in capability and ready for reuse in the UI.
+- `down_data/backend/`: Facades and services that translate UI requests into `Player` operations.
+- `down_data/ui/`: Widgets, pages, and styling for the Qt application with placeholders for each planned screen.
+- `down_data/cli.py`: The original Rich-powered CLI is preserved for power users and quick testing.
+- `data/`, `agentic-feedback/`, `ootp-images/`: Existing assets remain untouched for reference and future development.
 
 ## Install
 
@@ -20,57 +20,46 @@ Removed legacy components include the `stats/` folder and `stats_engine.py`.
 pip install -r requirements.txt
 ```
 
-## Run
+PySide6 is now required for the desktop shell; the CLI continues to work with the same environment.
+
+## Run the desktop app
 
 ```bash
 python main.py
 ```
 
-You’ll be prompted for a player name and optional filters (team, position, draft year/team). Then choose actions to preview weekly/season stats, view career totals, fetch NextGen stats, or export a master stats table to `data/exports/`.
+The main window presents a navigation rail on the left and a player search workspace on the right. The search form wires into `PlayerService` for real data when available; the other sections display styled placeholders that map to the `ootp-images` inspiration screens.
 
-## Capabilities (via `player.py`)
+## Run the CLI (optional)
 
-- Flexible player resolution with optional disambiguation filters.
-- Profile snapshot with identifiers (GSIS, PFR, PFF, ESPN, etc.) and biographical fields.
-- Weekly/season stats: 1999–present.
-- NextGen advanced stats: 2016–present (passing/rushing/receiving).
-- Career totals and a full master stats table (one row per season) with optional playoffs.
-- CSV export from the CLI.
-
-## Data availability and limitations
-
-- Profile data exists across eras, but weekly/season stats are available from 1999 onward.
-- NextGen tracking metrics exist from 2016 onward.
-- Defensive player attribution in play-by-play is limited; coverage-derived stats are partial by nature.
-
-## Minimal example
-
-```python
-from player import Player
-
-player = Player(name="Patrick Mahomes")
-print(player.info())  # Profile dict
-
-# Weekly/season stats (1999+)
-stats = player.fetch_stats(seasons=[2018, 2019])
-
-# NextGen stats (2016+)
-ng = player.fetch_nextgen_stats(seasons=[2023], stat_type=player.get_nextgen_stat_type())
-
-# Career totals and master table
-totals = player.get_career_stats(seasons=True)
-master = player.get_master_stats_table()
+```bash
+python -m down_data.cli
 ```
 
-## Repository layout (post-cleanup)
+The terminal interface retains the existing features: resolve a player, preview stats, fetch NextGen data, and export CSVs.
 
-- `player.py`
-- `main.py`
-- `data/`
-- `agentic-feedback/`
-- `ootp-images/`
-- `requirements.txt`
-- `README.md`
+## Repository layout
+
+```
+.
+├── main.py                   # Desktop entry point
+├── down_data/
+│   ├── app.py                # Qt bootstrap helpers
+│   ├── cli.py                # Terminal explorer (legacy but maintained)
+│   ├── backend/              # Services and data facades
+│   ├── core/                 # Domain models (Player, profiles, queries)
+│   └── ui/                   # Qt widgets, pages, styles
+├── data/                     # Local data workspace
+├── ootp-images/              # UI inspiration screenshots
+├── agentic-feedback/         # Brainstorming notes
+└── requirements.txt
+```
+
+## Next steps
+
+- Flesh out the player search UX (results styling, keyboard shortcuts, live feedback).
+- Replace placeholder screens with purpose-built widgets referencing the `ootp-images` mocks.
+- Introduce shared view models/controllers to drive navigation between pages.
 
 ## Credits
 

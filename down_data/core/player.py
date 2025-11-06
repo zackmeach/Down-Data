@@ -28,7 +28,7 @@ EARLIEST_NEXTGEN_SEASON = 2016
 # Pro Football Reference Advanced Stats availability
 EARLIEST_PFR_SEASON = 2018
 LATEST_PFR_SEASON = 2024
-PFR_DATA_DIR = Path(__file__).parent / "data" / "raw" / "pfr"
+PFR_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "raw" / "pfr"
 
 
 class PlayerNotFoundError(RuntimeError):
