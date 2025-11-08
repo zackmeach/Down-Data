@@ -46,15 +46,16 @@ class PlayerDirectory:
 
     @staticmethod
     def _to_polars(frame: object) -> pl.DataFrame:
+        """Coerce third-party dataframes into Polars instances."""
+
         if isinstance(frame, pl.DataFrame):
             return frame
         try:
-            import pandas as pd  # type: ignore
-        except ImportError:  # pragma: no cover - optional dependency
-            pd = None
-        if pd is not None and isinstance(frame, pd.DataFrame):
-            return pl.from_pandas(frame)
-        raise TypeError("Unsupported frame type returned by nflreadpy.load_players")
+            return pl.DataFrame(frame)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                f"Unsupported frame type returned by nflreadpy.load_players: {type(frame)!r}"
+            ) from exc
 
     @cached_property
     def frame(self) -> pl.DataFrame:
@@ -109,21 +110,19 @@ class PlayerDirectory:
             return []
 
         filters: List[pl.Expr] = []
-        if name:
-            escaped = re.escape(name.strip())
+        if name and (name_query := name.strip()):
+            escaped = re.escape(name_query)
             pattern = fr"(?i){escaped}"
             filters.append(
                 pl.col("full_name").str.contains(pattern) | pl.col("display_name").str.contains(pattern)
             )
-        if team:
-            filters.append(pl.col("recent_team").str.to_uppercase() == team.strip().upper())
-        if position:
-            filters.append(pl.col("position").str.to_uppercase() == position.strip().upper())
+        if team and (team_query := team.strip()):
+            filters.append(pl.col("recent_team").str.to_uppercase() == team_query.upper())
+        if position and (position_query := position.strip()):
+            filters.append(pl.col("position").str.to_uppercase() == position_query.upper())
 
-        filtered = frame
-        for expr in filters:
-            filtered = filtered.filter(expr)
-        trimmed = filtered.head(limit)
+        filtered = frame.filter(pl.all_horizontal(filters)) if filters else frame
+        trimmed = filtered.head(max(limit, 0))
 
         results: List[PlayerSummary] = []
         for row in trimmed.iter_rows(named=True):
@@ -176,8 +175,8 @@ class PlayerService:
             )
         except PlayerNotFoundError:
             raise
-        except Exception as exc:
-            logger.error("Unexpected error initialising Player: %%s", exc)
+        except Exception:
+            logger.exception("Unexpected error initialising Player from query: %s", resolved_query)
             raise
 
     def load_player_profile(self, query: PlayerQuery | PlayerSummary) -> PlayerProfile:
