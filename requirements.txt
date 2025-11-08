@@ -3,3 +3,4 @@ polars>=0.20.0
 pandas>=2.0.0
 rich>=13.9.0
 PySide6>=6.6.0
+charset-normalizer>=3.3.0

@@ -5,20 +5,11 @@ from __future__ import annotations
 from typing import Dict
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (
-    QHBoxLayout,
-    QListWidget,
-    QListWidgetItem,
-    QMainWindow,
-    QSizePolicy,
-    QStackedWidget,
-    QWidget,
-)
+from PySide6.QtWidgets import QMainWindow, QWidget
 
 from down_data.backend import PlayerService
 
-from .pages.player_search_page import PlayerSearchPage
-from .pages.placeholder_page import PlaceholderPage
+from .pages.content_page import ContentPage
 
 class MainWindow(QMainWindow):
     """Application shell with navigation and a stacked content area."""
@@ -26,52 +17,48 @@ class MainWindow(QMainWindow):
     def __init__(self, service: PlayerService | None = None) -> None:
         super().__init__()
         self.setWindowTitle("Down-Data Player Explorer")
-        self.resize(1200, 800)
+        # Prefer a 16:9 base size and start maximized; enforce 16:9 on manual resizes
+        self.resize(1600, 900)
+        self.setMinimumSize(1280, 720)
+        self.setWindowState(Qt.WindowMaximized)
+
+        self._aspect_ratio = 16 / 9
+        self._enforcing_aspect = False
 
         self._service = service or PlayerService()
         self._pages: Dict[str, QWidget] = {}
-
-        central = QWidget(self)
-        layout = QHBoxLayout(central)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self._nav = QListWidget(central)
-        self._nav.setFixedWidth(220)
-        self._nav.setSpacing(2)
-        self._nav.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        self._nav.setAlternatingRowColors(True)
-        self._nav.setSelectionMode(QListWidget.SingleSelection)
-
-        self._stack = QStackedWidget(central)
-        self._stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-
-        layout.addWidget(self._nav)
-        layout.addWidget(self._stack, stretch=1)
-
-        self.setCentralWidget(central)
-
         self._build_pages()
-        self._nav.currentRowChanged.connect(self._stack.setCurrentIndex)
-        self._nav.setCurrentRow(0)
+
+        # Set the ContentPage as the central widget (handles all navigation)
+        self.setCentralWidget(self._pages["Content"])
+
+    # Keep the window in a 16:9 aspect ratio on manual resizes
+    def resizeEvent(self, event):  # type: ignore[override]
+        if self._enforcing_aspect:
+            return super().resizeEvent(event)
+        # Do not interfere while maximized (window manager controls geometry)
+        if self.isMaximized():
+            return super().resizeEvent(event)
+
+        self._enforcing_aspect = True
+        try:
+            width = self.width()
+            height = self.height()
+            desired_by_width = int(round(width / self._aspect_ratio))
+            desired_by_height = int(round(height * self._aspect_ratio))
+
+            # Choose the adjustment with minimal change
+            if abs(desired_by_width - height) <= abs(desired_by_height - width):
+                self.resize(width, max(self.minimumHeight(), desired_by_width))
+            else:
+                self.resize(max(self.minimumWidth(), desired_by_height), height)
+        finally:
+            self._enforcing_aspect = False
+        return super().resizeEvent(event)
 
     def _build_pages(self) -> None:
-        pages = [
-            ("Player Search", PlayerSearchPage(service=self._service)),
-            ("Player Profile - Summary", PlaceholderPage("Player profile summary layout placeholder")),
-            ("Player Profile - Contract", PlaceholderPage("Contract details placeholder")),
-            ("Player Profile - Injury History", PlaceholderPage("Injury history placeholder")),
-            ("Player History - Accomplishments", PlaceholderPage("Player history & accolades placeholder")),
-            ("Player Stats - Overview", PlaceholderPage("Stats overview placeholder")),
-            ("Player Stats - Game Log", PlaceholderPage("Game log placeholder")),
-            ("Player Stats - Streaks", PlaceholderPage("Streaks placeholder")),
-        ]
-
-        for title, widget in pages:
-            item = QListWidgetItem(title)
-            item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            self._nav.addItem(item)
-            self._stack.addWidget(widget)
-            self._pages[title] = widget
+        # Create the main content page with hierarchical navigation
+        self._pages["Content"] = ContentPage(service=self._service)
 
     def page(self, title: str) -> QWidget:
         return self._pages[title]

@@ -144,6 +144,10 @@ class PlayerService:
     def __init__(self, directory: Optional[PlayerDirectory] = None) -> None:
         self.directory = directory or PlayerDirectory()
 
+    def get_all_players(self) -> pl.DataFrame:
+        """Get the full player directory as a DataFrame for filtering."""
+        return self.directory.frame
+
     def search_players(
         self,
         *,

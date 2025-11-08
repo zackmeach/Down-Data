@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QLabel, QWidget
 
 from .base_page import SectionPage
 
 
 class PlaceholderPage(SectionPage):
-    def __init__(self, message: str, *, title: str | None = None) -> None:
-        super().__init__(title=title)
+    def __init__(self, message: str, *, title: str | None = None, parent: Optional[QWidget] = None) -> None:
+        super().__init__(title=title, parent=parent)
         label = QLabel(message, self)
         label.setWordWrap(True)
         label.setAlignment(Qt.AlignCenter)
