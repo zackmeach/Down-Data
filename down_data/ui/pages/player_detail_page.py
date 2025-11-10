@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime
 import logging
 import math
+import random
 from typing import Any
 
 import polars as pl
@@ -19,7 +21,15 @@ from PySide6.QtWidgets import (
 
 from down_data.backend.player_service import PlayerService
 from down_data.core import PlayerQuery, PlayerNotFoundError, SeasonNotAvailableError
-from down_data.ui.widgets import GridCell, GridLayoutManager, Panel, TablePanel
+from down_data.ui.widgets import (
+    GridCell,
+    GridLayoutManager,
+    Panel,
+    TablePanel,
+    PersonalDetailsWidget,
+    BasicRatingsWidget,
+)
+from down_data.ui.widgets.player_detail_panels import RatingBreakdown
 
 from .base_page import SectionPage
 
@@ -63,6 +73,20 @@ class PlayerDetailSectionScaffold(QWidget):
         },
     ]
 
+    PERSONAL_DETAIL_FIELDS = [
+        "Age",
+        "Date of Birth",
+        "City of Birth",
+        "Nationality",
+        "Primary Position",
+        "Handedness",
+        "Current Team",
+        "Salary (AAV)",
+        "Signed Through",
+        "College",
+        "Service (Years, Games, Snaps)",
+    ]
+
     def __init__(
         self,
         *,
@@ -76,6 +100,8 @@ class PlayerDetailSectionScaffold(QWidget):
         self._grid_layout = GridLayoutManager(self, columns=12, rows=24)
         self._panels: list[Panel] = []
         self._table_panel: TablePanel | None = None
+        self._personal_details_widget: PersonalDetailsWidget | None = None
+        self._basic_ratings_widget: BasicRatingsWidget | None = None
         self._build_panels()
 
     def _build_panels(self) -> None:
@@ -113,15 +139,25 @@ class PlayerDetailSectionScaffold(QWidget):
             panel = Panel(title=panel_title, parent=self)
             panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-            placeholder = QLabel("CONTENT COMING SOON", panel)
-            placeholder.setAlignment(Qt.AlignCenter)
-            placeholder.setStyleSheet(
-                "color: #7A8894; font-size: 14px; letter-spacing: 1px;"
-            )
+            if title == "Personal Details":
+                widget = PersonalDetailsWidget(self.PERSONAL_DETAIL_FIELDS, parent=panel)
+                panel.content_layout.addWidget(widget)
+                panel.content_layout.addStretch(1)
+                self._personal_details_widget = widget
+            elif title == "Basic Ratings":
+                widget = BasicRatingsWidget(parent=panel)
+                panel.content_layout.addWidget(widget)
+                self._basic_ratings_widget = widget
+            else:
+                placeholder = QLabel("CONTENT COMING SOON", panel)
+                placeholder.setAlignment(Qt.AlignCenter)
+                placeholder.setStyleSheet(
+                    "color: #7A8894; font-size: 14px; letter-spacing: 1px;"
+                )
 
-            panel.content_layout.addStretch(1)
-            panel.content_layout.addWidget(placeholder, alignment=Qt.AlignCenter)
-            panel.content_layout.addStretch(1)
+                panel.content_layout.addStretch(1)
+                panel.content_layout.addWidget(placeholder, alignment=Qt.AlignCenter)
+                panel.content_layout.addStretch(1)
 
             self._grid_layout.add_widget(panel, cell)
             self._panels.append(panel)
@@ -142,6 +178,14 @@ class PlayerDetailSectionScaffold(QWidget):
 
         for row in rows:
             self._table_panel.add_row(row)
+
+    def update_personal_details(self, details: list[tuple[str, str]]) -> None:
+        if self._personal_details_widget is not None:
+            self._personal_details_widget.set_details(details)
+
+    def update_basic_ratings(self, ratings: list[RatingBreakdown]) -> None:
+        if self._basic_ratings_widget is not None:
+            self._basic_ratings_widget.set_ratings(ratings)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         """Ensure panels stay aligned with the grid when the widget resizes."""
@@ -198,6 +242,8 @@ class PlayerDetailPage(SectionPage):
         """Store the latest payload and clear the content area for forthcoming layout."""
 
         self._current_payload = dict(payload) if payload is not None else None
+        self._update_personal_details_views()
+        self._update_basic_ratings_views()
         self._load_player_stats()
         self._show_content(self._active_section, self._active_subsection)
 
@@ -206,6 +252,8 @@ class PlayerDetailPage(SectionPage):
 
         self._current_payload = None
         self._season_rows = []
+        self._update_personal_details_views()
+        self._update_basic_ratings_views()
         self._update_table_views()
         self._show_content(self.PRIMARY_SECTIONS[0], self.PROFILE_SUBSECTIONS[0])
 
@@ -262,6 +310,228 @@ class PlayerDetailPage(SectionPage):
         for widget in self._content_panels.values():
             if isinstance(widget, PlayerDetailSectionScaffold):
                 widget.update_table_rows(self._season_rows)
+
+    def _update_personal_details_views(self) -> None:
+        details = self._build_personal_detail_rows()
+        for widget in self._content_panels.values():
+            if isinstance(widget, PlayerDetailSectionScaffold):
+                widget.update_personal_details(details)
+
+    def _update_basic_ratings_views(self) -> None:
+        ratings = self._generate_basic_ratings()
+        for widget in self._content_panels.values():
+            if isinstance(widget, PlayerDetailSectionScaffold):
+                widget.update_basic_ratings(ratings)
+
+    def _build_personal_detail_rows(self) -> list[tuple[str, str]]:
+        payload = self._current_payload or {}
+        raw = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
+
+        details: list[tuple[str, str]] = []
+
+        age_value = payload.get("age") or (raw.get("age") if isinstance(raw, dict) else None)
+        details.append(("Age", self._format_optional_int(age_value)))
+
+        birth_value = self._first_non_empty(
+            payload.get("birth_date"),
+            payload.get("birthdate"),
+            raw.get("birth_date") if isinstance(raw, dict) else None,
+            raw.get("birthdate") if isinstance(raw, dict) else None,
+            raw.get("dob") if isinstance(raw, dict) else None,
+        )
+        details.append(("Date of Birth", self._format_birth_date(birth_value)))
+
+        birth_city = self._first_non_empty(
+            raw.get("birth_city") if isinstance(raw, dict) else None,
+            raw.get("birthplace") if isinstance(raw, dict) else None,
+            raw.get("birth_place") if isinstance(raw, dict) else None,
+            raw.get("city_of_birth") if isinstance(raw, dict) else None,
+            payload.get("birth_city"),
+        )
+        birth_state = self._first_non_empty(
+            raw.get("birth_state") if isinstance(raw, dict) else None,
+            raw.get("state_of_birth") if isinstance(raw, dict) else None,
+            raw.get("birth_state_province") if isinstance(raw, dict) else None,
+        )
+        birth_country = self._first_non_empty(
+            raw.get("birth_country") if isinstance(raw, dict) else None,
+            raw.get("country_of_birth") if isinstance(raw, dict) else None,
+            payload.get("birth_country"),
+        )
+        birthplace_parts = [
+            part.strip()
+            for part in [birth_city or "", birth_state or "", birth_country or ""]
+            if isinstance(part, str) and part.strip()
+        ]
+        details.append(("City of Birth", ", ".join(birthplace_parts) if birthplace_parts else "—"))
+
+        nationality = self._first_non_empty(
+            payload.get("nationality"),
+            raw.get("nationality") if isinstance(raw, dict) else None,
+            raw.get("citizenship") if isinstance(raw, dict) else None,
+            birth_country,
+        )
+        details.append(("Nationality", self._format_text(nationality)))
+
+        position = self._first_non_empty(
+            payload.get("position"),
+            raw.get("position") if isinstance(raw, dict) else None,
+            raw.get("player_position") if isinstance(raw, dict) else None,
+        )
+        details.append(("Primary Position", self._format_text(position)))
+
+        handedness = self._first_non_empty(
+            raw.get("handedness") if isinstance(raw, dict) else None,
+            raw.get("throws") if isinstance(raw, dict) else None,
+            raw.get("dominant_hand") if isinstance(raw, dict) else None,
+            raw.get("hand") if isinstance(raw, dict) else None,
+            payload.get("handedness"),
+        )
+        details.append(("Handedness", self._format_text(handedness)))
+
+        team = self._first_non_empty(
+            payload.get("team"),
+            payload.get("current_team"),
+            raw.get("team_abbr") if isinstance(raw, dict) else None,
+            raw.get("current_team_abbr") if isinstance(raw, dict) else None,
+            raw.get("recent_team") if isinstance(raw, dict) else None,
+            raw.get("team") if isinstance(raw, dict) else None,
+        )
+        details.append(("Current Team", self._format_text(team)))
+
+        salary_text = self._derive_salary_text(
+            payload if isinstance(payload, dict) else {},
+            raw if isinstance(raw, dict) else {},
+        )
+        details.append(("Salary (AAV)", salary_text))
+
+        signed_through = self._first_non_empty(
+            payload.get("signed_through"),
+            payload.get("contract_end"),
+            raw.get("signed_through") if isinstance(raw, dict) else None,
+            raw.get("contract_end") if isinstance(raw, dict) else None,
+            raw.get("contract_year_to") if isinstance(raw, dict) else None,
+            raw.get("contract_years") if isinstance(raw, dict) else None,
+        )
+        signed_text = self._format_signed_through(signed_through)
+        details.append(("Signed Through", signed_text))
+
+        college = self._first_non_empty(
+            payload.get("college"),
+            raw.get("college") if isinstance(raw, dict) else None,
+            raw.get("college_name") if isinstance(raw, dict) else None,
+        )
+        details.append(("College", self._format_text(college)))
+
+        years_value = self._extract_numeric_value(
+            payload,
+            ["experience", "service_years", "seasons", "years_exp"],
+        )
+        if years_value is None and isinstance(raw, dict):
+            years_value = self._extract_numeric_value(
+                raw,
+                [
+                    "experience",
+                    "service_years",
+                    "seasons",
+                    "years_exp",
+                    "years_pro",
+                ],
+            )
+
+        games_value = self._extract_numeric_value(
+            payload,
+            ["career_games", "games", "games_played"],
+        )
+        if games_value is None and isinstance(raw, dict):
+            games_value = self._extract_numeric_value(
+                raw,
+                ["career_games", "games", "games_played", "games_active"],
+            )
+
+        snaps_value = None
+        if isinstance(raw, dict):
+            snaps_value = self._extract_numeric_value(
+                raw,
+                [
+                    "snaps",
+                    "offense_snaps",
+                    "defense_snaps",
+                    "special_teams_snaps",
+                    "snaps_total",
+                ],
+            )
+        if snaps_value is None:
+            snaps_value = self._extract_numeric_value(
+                payload,
+                ["snaps", "career_snaps"],
+            )
+
+        service_parts: list[str] = []
+        if years_value is not None:
+            service_parts.append(f"{int(round(years_value))} yrs")
+        if games_value is not None:
+            service_parts.append(f"{int(round(games_value))} g")
+        if snaps_value is not None:
+            service_parts.append(f"{int(round(snaps_value)):,} snaps")
+        service_text = ", ".join(service_parts) if service_parts else "—"
+        details.append(("Service (Years, Games, Snaps)", service_text))
+
+        return details
+
+    def _generate_basic_ratings(self) -> list[RatingBreakdown]:
+        if not self._current_payload:
+            return []
+
+        seed_source = "|".join(
+            filter(
+                None,
+                [
+                    str(self._current_payload.get("full_name") or ""),
+                    str(self._current_payload.get("team") or ""),
+                    str(self._current_payload.get("position") or ""),
+                ],
+            )
+        )
+        rng = random.Random(seed_source)
+
+        categories = [
+            ("Athleticism", ("Speed", "Agility")),
+            ("Technical", ("Technique", "Vision")),
+            ("Intangibles", ("Awareness", "Leadership")),
+        ]
+
+        def sample_rating() -> int:
+            choices = [20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80]
+            return rng.choice(choices)
+
+        ratings: list[RatingBreakdown] = []
+        for label, sublabels in categories:
+            current = sample_rating()
+            potential = max(current, sample_rating())
+            subratings: list[RatingBreakdown] = []
+            for sublabel in sublabels:
+                delta = rng.choice([-10, -5, 0, 5, 10])
+                sub_current = self._clamp_rating(current + delta)
+                sub_potential = max(sub_current, self._clamp_rating(sub_current + rng.choice([0, 5, 10])))
+                subratings.append(
+                    RatingBreakdown(
+                        label=sublabel,
+                        current=sub_current,
+                        potential=sub_potential,
+                        subratings=(),
+                    )
+                )
+            ratings.append(
+                RatingBreakdown(
+                    label=label,
+                    current=current,
+                    potential=potential,
+                    subratings=tuple(subratings),
+                )
+            )
+
+        return ratings
 
     def _load_player_stats(self) -> None:
         """Fetch player stats and update table rows."""
@@ -537,3 +807,195 @@ class PlayerDetailPage(SectionPage):
         if default is not None:
             expr = expr.fill_null(default)
         return expr.alias(alias)
+
+    @staticmethod
+    def _clamp_rating(value: int) -> int:
+        value = max(20, min(80, int(round(value))))
+        remainder = value % 5
+        if remainder:
+            value = value - remainder if remainder < 3 else value + (5 - remainder)
+        return max(20, min(80, value))
+
+    @staticmethod
+    def _format_optional_int(value: Any) -> str:
+        text = PlayerDetailPage._format_int(value)
+        return text if text else "—"
+
+    @staticmethod
+    def _first_non_empty(*values: Any) -> Any | None:
+        for value in values:
+            if value is None:
+                continue
+            if isinstance(value, str):
+                if value.strip() == "":
+                    continue
+                return value
+            return value
+        return None
+
+    @staticmethod
+    def _format_text(value: Any) -> str:
+        if value is None:
+            return "—"
+        if isinstance(value, str):
+            text = value.strip()
+            return text if text else "—"
+        return str(value)
+
+    @staticmethod
+    def _parse_numeric(value: Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            if isinstance(value, float) and math.isnan(value):
+                return None
+            return float(value)
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned:
+                return None
+            cleaned = cleaned.replace("$", "").replace(",", "")
+            try:
+                return float(cleaned)
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _extract_numeric_value(source: Any, keys: list[str]) -> float | None:
+        if not isinstance(source, dict):
+            return None
+        for key in keys:
+            if key not in source:
+                continue
+            parsed = PlayerDetailPage._parse_numeric(source.get(key))
+            if parsed is not None:
+                return parsed
+        return None
+
+    @staticmethod
+    def _derive_salary_text(payload: dict[str, Any], raw: dict[str, Any]) -> str:
+        value = PlayerDetailPage._extract_numeric_value(
+            payload,
+            [
+                "salary_aav",
+                "salary",
+                "contract_aav",
+                "apy",
+                "aav",
+                "average_salary",
+                "apy_millions",
+            ],
+        )
+
+        if value is None:
+            value = PlayerDetailPage._extract_numeric_value(
+                raw,
+                [
+                    "salary_aav",
+                    "contract_aav",
+                    "apy",
+                    "apy_current",
+                    "average_salary",
+                    "aav",
+                    "avg_salary",
+                    "apy_millions",
+                ],
+            )
+
+        if value is None:
+            return "—"
+
+        assume_millions = False
+        if isinstance(payload, dict):
+            assume_millions = any(key in payload for key in ("apy_millions",))
+        if isinstance(raw, dict) and not assume_millions:
+            assume_millions = any(key in raw for key in ("apy_millions", "apy_cap_millions"))
+
+        return PlayerDetailPage._format_currency(value, assume_millions=assume_millions)
+
+    @staticmethod
+    def _format_currency(value: float, *, assume_millions: bool = False) -> str:
+        try:
+            amount = float(value)
+        except (TypeError, ValueError):
+            return "—"
+
+        if assume_millions:
+            millions = amount
+        else:
+            if abs(amount) >= 1_000_000:
+                millions = amount / 1_000_000.0
+            elif abs(amount) <= 200:
+                millions = amount
+            else:
+                millions = amount / 1_000_000.0
+
+        return f"${millions:,.1f}M"
+
+    @staticmethod
+    def _format_signed_through(value: Any) -> str:
+        if value is None:
+            return "—"
+        if isinstance(value, (int, float)):
+            if isinstance(value, float) and math.isnan(value):
+                return "—"
+            year = int(round(value))
+            return str(year)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return "—"
+            if text.isdigit():
+                return text
+            parsed = PlayerDetailPage._parse_date_value(text)
+            if parsed:
+                return str(parsed.year)
+            return text
+        parsed_date = PlayerDetailPage._parse_date_value(value)
+        if parsed_date:
+            return str(parsed_date.year)
+        return PlayerDetailPage._format_text(value)
+
+    @staticmethod
+    def _parse_date_value(value: Any) -> date | None:
+        if value is None:
+            return None
+        if isinstance(value, date):
+            return value
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                return date.fromisoformat(text)
+            except ValueError:
+                pass
+            for fmt in (
+                "%m/%d/%Y",
+                "%m/%d/%y",
+                "%Y/%m/%d",
+                "%d-%m-%Y",
+                "%b %d %Y",
+                "%B %d %Y",
+            ):
+                try:
+                    return datetime.strptime(text, fmt).date()
+                except ValueError:
+                    continue
+        return None
+
+    @staticmethod
+    def _format_birth_date(value: Any) -> str:
+        parsed = PlayerDetailPage._parse_date_value(value)
+        if not parsed:
+            return "—"
+        suffix = PlayerDetailPage._ordinal_suffix(parsed.day)
+        month = parsed.strftime("%B")
+        return f"{month} {parsed.day}{suffix}, {parsed.year}"
+
+    @staticmethod
+    def _ordinal_suffix(day: int) -> str:
+        if 11 <= day % 100 <= 13:
+            return "th"
+        return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
