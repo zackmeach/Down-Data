@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
 import logging
 import re
-from typing import Iterable, List, Optional
 
 import polars as pl
 
@@ -25,8 +25,8 @@ class PlayerSummary:
     """Lightweight player record used by the UI search view."""
 
     profile: PlayerProfile
-    team: Optional[str]
-    position: Optional[str]
+    team: str | None
+    position: str | None
 
     def to_query(self) -> PlayerQuery:
         return PlayerQuery(
@@ -42,7 +42,7 @@ class PlayerDirectory:
     """Caches the full nflreadpy player directory for quick search access."""
 
     def __init__(self) -> None:
-        self._frame: Optional[pl.DataFrame] = None
+        self._frame: pl.DataFrame | None = None
 
     @staticmethod
     def _to_polars(frame: object) -> pl.DataFrame:
@@ -101,15 +101,15 @@ class PlayerDirectory:
         self,
         *,
         name: str,
-        team: Optional[str] = None,
-        position: Optional[str] = None,
+        team: str | None = None,
+        position: str | None = None,
         limit: int = 25,
-    ) -> List[PlayerSummary]:
+    ) -> list[PlayerSummary]:
         frame = self.frame
         if frame.height == 0:
             return []
 
-        filters: List[pl.Expr] = []
+        filters: list[pl.Expr] = []
         if name and (name_query := name.strip()):
             escaped = re.escape(name_query)
             pattern = fr"(?i){escaped}"
@@ -124,7 +124,7 @@ class PlayerDirectory:
         filtered = frame.filter(pl.all_horizontal(filters)) if filters else frame
         trimmed = filtered.head(max(limit, 0))
 
-        results: List[PlayerSummary] = []
+        results: list[PlayerSummary] = []
         for row in trimmed.iter_rows(named=True):
             profile = PlayerProfile.from_row(row)
             results.append(
@@ -140,7 +140,7 @@ class PlayerDirectory:
 class PlayerService:
     """Facade used by the UI layer to work with players."""
 
-    def __init__(self, directory: Optional[PlayerDirectory] = None) -> None:
+    def __init__(self, directory: PlayerDirectory | None = None) -> None:
         self.directory = directory or PlayerDirectory()
 
     def get_all_players(self) -> pl.DataFrame:
@@ -151,10 +151,10 @@ class PlayerService:
         self,
         *,
         name: str,
-        team: Optional[str] = None,
-        position: Optional[str] = None,
+        team: str | None = None,
+        position: str | None = None,
         limit: int = 25,
-    ) -> List[PlayerSummary]:
+    ) -> list[PlayerSummary]:
         """Search for player summaries matching the provided filters."""
 
         if not name and not team and not position:
@@ -189,8 +189,8 @@ class PlayerService:
         self,
         query: PlayerQuery | PlayerSummary,
         *,
-        seasons: Optional[Iterable[int]] = None,
-        season_type: Optional[str] = None,
+        seasons: Iterable[int] | None = None,
+        season_type: str | None = None,
     ) -> pl.DataFrame:
         player = self.load_player(query)
         return player.fetch_stats(seasons=seasons, season_type=season_type)

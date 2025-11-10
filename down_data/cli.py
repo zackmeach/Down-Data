@@ -8,7 +8,6 @@ the Player object as the single source of truth.
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, Tuple
 
 import polars as pl
 from rich.console import Console
@@ -22,7 +21,7 @@ logging.basicConfig(level=logging.WARNING)
 console = Console()
 
 
-def _parse_seasons(value: str) -> Optional[List[int] | bool]:
+def _parse_seasons(value: str) -> list[int] | bool | None:
     """Parse user input like '2019,2021-2023' or 'all' into a list of ints or True.
 
     Returns None for empty input.
@@ -33,7 +32,7 @@ def _parse_seasons(value: str) -> Optional[List[int] | bool]:
     lowered = value.lower()
     if lowered in {"all", "*", "true"}:
         return True
-    seasons: List[int] = []
+    seasons: list[int] = []
     for token in value.replace(" ", "").split(","):
         if not token:
             continue

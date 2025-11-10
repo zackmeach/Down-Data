@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
 
 
@@ -27,7 +25,7 @@ class Panel(QFrame):
     def __init__(
         self,
         *,
-        title: Optional[str] = None,
+        title: str | None = None,
         parent: QWidget | None = None,
         object_name: str = "Panel",
     ) -> None:
@@ -44,7 +42,7 @@ class Panel(QFrame):
         self._layout.setSpacing(12)
         
         # Optional title label at top-left
-        self._title_label: Optional[QLabel] = None
+        self._title_label: QLabel | None = None
         if title:
             self._title_label = QLabel(title.upper(), self)
             self._title_label.setObjectName("PanelTitle")
@@ -71,7 +69,7 @@ class FilterPanel(Panel):
     def __init__(
         self,
         *,
-        title: Optional[str] = None,
+        title: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(title=title, parent=parent, object_name="FilterPanel")
@@ -83,7 +81,7 @@ class ContentPanel(Panel):
     def __init__(
         self,
         *,
-        title: Optional[str] = None,
+        title: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(title=title, parent=parent, object_name="ContentPanel")
@@ -95,7 +93,7 @@ class DetailPanel(Panel):
     def __init__(
         self,
         *,
-        title: Optional[str] = None,
+        title: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(title=title, parent=parent, object_name="DetailPanel")

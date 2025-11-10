@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable, Optional
+from collections.abc import Iterable
 
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QWidget
@@ -15,7 +15,7 @@ class ContextBar(QFrame):
         self,
         *,
         title: str = "FIND A PLAYER",
-        schedule_options: Optional[Iterable[str]] = None,
+        schedule_options: Iterable[str] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)

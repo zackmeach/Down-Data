@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import math
-from datetime import datetime
+from datetime import date, datetime
 
 import polars as pl
 
+from typing import Any
+
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QComboBox,
@@ -26,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from down_data.backend.player_service import PlayerService
-from down_data.ui.widgets import GridCell, GridLayoutManager, FilterPanel, TablePanel
+from down_data.ui.widgets import GridCell, GridLayoutManager, FilterPanel, RangeSelector, TablePanel
 
 from .base_page import SectionPage
 
@@ -43,11 +44,13 @@ class PlayerSearchPage(SectionPage):
     - Detail panel: TBD (optional right sidebar for preview)
     """
 
+    playerSelected = Signal(dict)
+
     def __init__(
         self, 
         *, 
         service: PlayerService, 
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(title="Player Search", parent=parent)
         self._service = service
@@ -176,11 +179,128 @@ class PlayerSearchPage(SectionPage):
         self._draft_round_options = ["Any"] + [str(i) for i in range(1, 8)] + ["Undrafted"]
         self._draft_position_options = ["Any"] + [str(i) for i in range(1, 33)] + ["N/A"]
         self._draft_team_options = self._team_options.copy()
+
+    @staticmethod
+    def _format_cell_value(value: Any) -> str:
+        """Format cell values for table display."""
+        if value is None:
+            return ""
+        if isinstance(value, float):
+            if math.isnan(value):
+                return ""
+            if value.is_integer():
+                return str(int(value))
+            formatted = f"{value:.1f}".rstrip("0").rstrip(".")
+            return formatted or "0"
+        if isinstance(value, int):
+            return str(value)
+        text = str(value).strip()
+        return "" if text.lower() in {"nan", "none"} else text
         # Draft-related options
         self._draft_round_options = ["Any"] + [str(i) for i in range(1, 8)] + ["Undrafted"]
         self._draft_position_options = ["Any"] + [str(i) for i in range(1, 33)] + ["N/A"]
         self._draft_team_options = self._team_options.copy()
-    
+
+    def _prepare_player_directory_frame(self, frame: pl.DataFrame | None) -> pl.DataFrame:
+        """Return a normalised copy of the player directory with derived fields."""
+        if frame is None:
+            return pl.DataFrame()
+        if frame.height == 0:
+            return frame
+
+        prepared = frame.clone()
+
+        # Ensure consistent position formatting
+        if "position" in prepared.columns:
+            prepared = prepared.with_columns(
+                pl.col("position")
+                .cast(pl.Utf8, strict=False)
+                .str.strip_chars()
+                .str.to_uppercase()
+                .alias("position")
+            )
+
+        # Add missing team abbreviation columns using available sources
+        if "team_abbr" not in prepared.columns:
+            for source in ("recent_team", "current_team_abbr", "team"):
+                if source in prepared.columns:
+                    prepared = prepared.with_columns(pl.col(source).alias("team_abbr"))
+                    break
+        if "current_team_abbr" not in prepared.columns:
+            for source in ("team_abbr", "recent_team", "team"):
+                if source in prepared.columns:
+                    prepared = prepared.with_columns(pl.col(source).alias("current_team_abbr"))
+                    break
+
+        for team_col in ("team_abbr", "current_team_abbr", "recent_team", "team"):
+            if team_col in prepared.columns:
+                prepared = prepared.with_columns(
+                    pl.col(team_col)
+                    .cast(pl.Utf8, strict=False)
+                    .str.strip_chars()
+                    .str.to_uppercase()
+                    .alias(team_col)
+                )
+
+        # Derive age from birth date if needed
+        birth_column = next(
+            (col for col in ("birth_date", "birthdate", "dob") if col in prepared.columns),
+            None,
+        )
+
+        if birth_column:
+            birth_expr = pl.col(birth_column)
+            if prepared.schema.get(birth_column) == pl.Utf8:
+                birth_expr = birth_expr.str.strptime(pl.Date, strict=False)
+            else:
+                birth_expr = birth_expr.cast(pl.Date, strict=False)
+
+            prepared = prepared.with_columns(birth_expr.alias("_birth_date_tmp"))
+
+            today = date.today()
+            computed_age_expr = (
+                pl.when(pl.col("_birth_date_tmp").is_not_null())
+                .then(
+                    pl.lit(today.year)
+                    - pl.col("_birth_date_tmp").dt.year()
+                    - (
+                        (
+                            (pl.col("_birth_date_tmp").dt.month() > today.month)
+                            | (
+                                (pl.col("_birth_date_tmp").dt.month() == today.month)
+                                & (pl.col("_birth_date_tmp").dt.day() > today.day)
+                            )
+                        ).cast(pl.Int16)
+                    )
+                )
+                .otherwise(None)
+                .cast(pl.Int16)
+                .alias("_computed_age")
+            )
+
+            prepared = prepared.with_columns(computed_age_expr)
+            prepared = prepared.drop("_birth_date_tmp")
+
+            if "_computed_age" in prepared.columns:
+                if "age" in prepared.columns:
+                    prepared = prepared.with_columns(
+                        pl.when(
+                            pl.col("age")
+                            .cast(pl.Int16, strict=False)
+                            .is_null()
+                        )
+                        .then(pl.col("_computed_age"))
+                        .otherwise(
+                            pl.col("age").cast(pl.Int16, strict=False)
+                        )
+                        .alias("age")
+                    )
+                else:
+                    prepared = prepared.with_columns(pl.col("_computed_age").alias("age"))
+                prepared = prepared.drop("_computed_age")
+
+        return prepared
+
     def _build_filter_panel(self) -> None:
         """Create the left filter panel for search controls."""
         self._filter_panel = FilterPanel(title="FIND PLAYER", parent=self)
@@ -303,32 +423,24 @@ class PlayerSearchPage(SectionPage):
     def _add_age_filter(self, tab_key: str) -> QGroupBox:
         """Create age range filter group."""
         age_group = QGroupBox("Age")
-        age_layout = QHBoxLayout()
-        age_layout.setSpacing(8)
+        age_layout = QVBoxLayout()
+        age_layout.setContentsMargins(4, 4, 4, 4)
+        age_layout.setSpacing(4)
         age_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        
-        # From dropdown
+
         age_from = QComboBox()
         age_from.setObjectName("FilterComboBox")
-        # Typical NFL age range: 20-45
         for age in range(20, 46):
             age_from.addItem(str(age))
         age_from.setCurrentText("20")
-        
-        to_label = QLabel("to")
-        to_label.setStyleSheet("color: #C6CED6; padding: 0 4px;")
-        
-        # To dropdown
         age_to = QComboBox()
         age_to.setObjectName("FilterComboBox")
         for age in range(20, 46):
             age_to.addItem(str(age))
         age_to.setCurrentText("45")
-        
-        age_layout.addWidget(age_from, 1)
-        age_layout.addWidget(to_label, 0)
-        age_layout.addWidget(age_to, 1)
-        
+
+        range_widget = RangeSelector(age_from, age_to, parent=age_group)
+        age_layout.addWidget(range_widget)
         age_group.setLayout(age_layout)
         # Store references for later access keyed by tab
         self._age_filters[tab_key] = (age_from, age_to)
@@ -337,32 +449,25 @@ class PlayerSearchPage(SectionPage):
     def _add_service_time_filter(self, tab_key: str) -> QGroupBox:
         """Create service time (years in league) range filter group."""
         service_group = QGroupBox("Service Time (Yrs)")
-        service_layout = QHBoxLayout()
-        service_layout.setSpacing(8)
+        service_layout = QVBoxLayout()
+        service_layout.setContentsMargins(4, 4, 4, 4)
+        service_layout.setSpacing(4)
         service_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         
-        # From dropdown
         service_from = QComboBox()
         service_from.setObjectName("FilterComboBox")
         # Typical NFL career: 0-25 years
         for years in range(0, 26):
             service_from.addItem(str(years))
         service_from.setCurrentText("0")
-        
-        to_label = QLabel("to")
-        to_label.setStyleSheet("color: #C6CED6; padding: 0 4px;")
-        
-        # To dropdown
         service_to = QComboBox()
         service_to.setObjectName("FilterComboBox")
         for years in range(0, 26):
             service_to.addItem(str(years))
         service_to.setCurrentText("25")
         
-        service_layout.addWidget(service_from, 1)
-        service_layout.addWidget(to_label, 0)
-        service_layout.addWidget(service_to, 1)
-        
+        range_widget = RangeSelector(service_from, service_to, parent=service_group)
+        service_layout.addWidget(range_widget)
         service_group.setLayout(service_layout)
         # Store references for later access keyed by tab
         self._service_filters[tab_key] = (service_from, service_to)
@@ -709,6 +814,8 @@ class PlayerSearchPage(SectionPage):
             GridCell(col=3, row=0, col_span=9, row_span=24)
         )
         
+        self._results_table.table.cellClicked.connect(self._on_results_row_activated)
+
         # Table starts empty - user must click SEARCH to populate
     
     def _perform_search(self) -> None:
@@ -763,10 +870,11 @@ class PlayerSearchPage(SectionPage):
         )
         
         try:
-            # Get all players from service
-            players_df = self._service.get_all_players()
+            # Get all players from service and enrich with derived fields
+            raw_players_df = self._service.get_all_players()
+            players_df = self._prepare_player_directory_frame(raw_players_df)
             
-            if players_df is None or players_df.height == 0:
+            if players_df.height == 0:
                 self._results_table.clear_data()
                 return
             
@@ -835,7 +943,7 @@ class PlayerSearchPage(SectionPage):
 
             def apply_threshold(
                 df: pl.DataFrame,
-                widgets: Optional[tuple[QAbstractSpinBox, QComboBox]],
+                widgets: tuple[QAbstractSpinBox, QComboBox] | None,
                 column_name: str,
                 *,
                 cast_type: pl.DataType = pl.Float64,
@@ -890,7 +998,7 @@ class PlayerSearchPage(SectionPage):
             players_df = apply_threshold(players_df, contract_apy_cap_pct_filter, "apy_cap_pct")
 
             # Filter by draft round
-            draft_round_int: Optional[int] = None
+            draft_round_int: int | None = None
             if draft_round_value != "Any":
                 if draft_round_value == "Undrafted":
                     conditions: list[pl.Expr] = []
@@ -990,16 +1098,73 @@ class PlayerSearchPage(SectionPage):
         page_df = self._current_results_df.slice(start, self._page_size)
 
         for row in page_df.iter_rows(named=True):
-            name = row.get('display_name') or row.get('full_name') or 'Unknown'
-            position = row.get('position') or ''
-            team = row.get('team_abbr') or row.get('current_team_abbr') or ''
-            age = str(row.get('age', ''))
-            height = row.get('height') or ''
-            weight = str(row.get('weight', '')) if row.get('weight') else ''
-            college = row.get('college') or ''
+            name_value = (
+                row.get("display_name")
+                or row.get("full_name")
+                or row.get("name")
+                or "Unknown"
+            )
+            name = self._format_cell_value(name_value) or "Unknown"
+
+            position = self._format_cell_value(row.get("position"))
+
+            team_value = (
+                row.get("team_abbr")
+                or row.get("current_team_abbr")
+                or row.get("recent_team")
+                or row.get("team")
+            )
+            team = self._format_cell_value(team_value)
+
+            age = self._format_cell_value(row.get("age"))
+            height = self._format_cell_value(row.get("height"))
+            weight = self._format_cell_value(row.get("weight"))
+            college = self._format_cell_value(
+                row.get("college") or row.get("college_name")
+            )
+
             self._results_table.add_row([name, position, team, age, height, weight, college])
 
         self._update_page_controls()
+
+    def _on_results_row_activated(self, row: int, _column: int) -> None:
+        """Handle selection of a result row to show player details."""
+        if self._current_results_df is None or self._current_page <= 0:
+            return
+
+        self._results_table.table.selectRow(row)
+
+        global_index = (self._current_page - 1) * self._page_size + row
+        if global_index < 0 or global_index >= self._current_results_df.height:
+            return
+
+        row_data = self._current_results_df.row(global_index, named=True)
+        if hasattr(row_data, "as_dict"):
+            record = row_data.as_dict()  # polars Row
+        elif isinstance(row_data, dict):
+            record = row_data
+        else:
+            record = dict(zip(self._current_results_df.columns, row_data))
+
+        player_info: dict[str, Any] = {
+            "full_name": record.get("display_name")
+            or record.get("full_name")
+            or record.get("name")
+            or "Unknown Player",
+            "position": record.get("position"),
+            "team": record.get("team_abbr")
+            or record.get("current_team_abbr")
+            or record.get("recent_team")
+            or record.get("team"),
+            "age": record.get("age"),
+            "college": record.get("college") or record.get("college_name"),
+            "gsis_id": record.get("gsis_id"),
+            "nfl_id": record.get("nfl_id"),
+            "pfr_id": record.get("pfr_id"),
+            "raw": record,
+        }
+
+        self.playerSelected.emit(player_info)
 
     def _update_page_controls(self) -> None:
         """Update pagination controls based on current page and totals."""

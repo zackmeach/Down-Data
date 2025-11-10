@@ -5,7 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QWidget
-from typing import Literal, Optional
+from typing import Literal
 
 
 class GridOverlay(QWidget):
@@ -31,7 +31,7 @@ class GridOverlay(QWidget):
         base_gutter_col: int = 10,
         base_gutter_row: int = 16,
         mode: Literal["both", "rows", "columns", "margins"] = "both",
-        show_margins: Optional[bool] = None,
+        show_margins: bool | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -49,9 +49,9 @@ class GridOverlay(QWidget):
         self.base_gutter_row = base_gutter_row
         self._mode: Literal["both", "rows", "columns", "margins"] = mode
         # If None, margins are only drawn when columns are drawn (i.e., not in rows-only mode)
-        self._show_margins_override: Optional[bool] = show_margins
+        self._show_margins_override: bool | None = show_margins
         # Track last logged geometry/gap to avoid spamming the console
-        self._last_pink_log: Optional[tuple[int, int, int, int, int, int, int, int, int, int]] = None
+        self._last_pink_log: tuple[int, int, int, int, int, int, int, int, int, int] | None = None
 
         # Make the overlay transparent to mouse events
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
@@ -105,7 +105,7 @@ class GridOverlay(QWidget):
             self._mode = mode
             self.update()
 
-    def set_show_margins(self, show: Optional[bool]) -> None:
+    def set_show_margins(self, show: bool | None) -> None:
         """Control drawing of margin lines (left/right and top/bottom).
 
         - True: always draw margins

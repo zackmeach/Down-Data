@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from PySide6.QtCore import QRect
 from PySide6.QtWidgets import QWidget
-from typing import Optional
 
 
 class GridCell:

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Dict
-
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import QMainWindow, QWidget
 
 from down_data.backend import PlayerService
@@ -26,14 +25,14 @@ class MainWindow(QMainWindow):
         self._enforcing_aspect = False
 
         self._service = service or PlayerService()
-        self._pages: Dict[str, QWidget] = {}
+        self._pages: dict[str, QWidget] = {}
         self._build_pages()
 
         # Set the ContentPage as the central widget (handles all navigation)
         self.setCentralWidget(self._pages["Content"])
 
-    # Keep the window in a 16:9 aspect ratio on manual resizes
-    def resizeEvent(self, event):  # type: ignore[override]
+    def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
+        """Keep the window near a 16:9 aspect ratio when manually resized."""
         if self._enforcing_aspect:
             return super().resizeEvent(event)
         # Do not interfere while maximized (window manager controls geometry)

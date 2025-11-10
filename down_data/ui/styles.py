@@ -116,6 +116,37 @@ def apply_app_palette(app: QApplication) -> None:
             selection-background-color: #2A8CA5;
             border: 1px solid #404040;
         }
+        QFrame#RangeSelectorCell {
+            background-color: #3A3A3A;
+            border: 1px solid #565656;
+            border-radius: 16px;
+        }
+        QFrame#RangeSelectorCell:focus-within {
+            border: 1px solid #2A8CA5;
+        }
+        QFrame#RangeSelectorCell QComboBox {
+            background: transparent;
+            border: none;
+            padding: 6px 16px;
+            min-width: 64px;
+            color: #FFFFFF;
+        }
+        QFrame#RangeSelectorCell QComboBox#FilterComboBox:hover,
+        QFrame#RangeSelectorCell QComboBox#FilterComboBox:focus {
+            border: none;
+        }
+        QFrame#RangeSelectorCell QComboBox::drop-down {
+            border: none;
+            width: 18px;
+            padding-right: 6px;
+        }
+        QLabel#RangeSelectorLabel {
+            color: #C6CED6;
+            font-size: 13px;
+            letter-spacing: 0.4px;
+            padding: 0 6px;
+        }
+
         QListWidget { background-color: #252525; border: none; }
         QListWidget::item:selected { background: #2A8CA5; color: #FFFFFF; }
         QTableView, QTableWidget { background-color: #252525; alternate-background-color: #2F2F2F; gridline-color: #404040; selection-background-color: #2A8CA5; selection-color: #FFFFFF; }
@@ -186,6 +217,22 @@ def apply_app_palette(app: QApplication) -> None:
         QPushButton#NavItem:pressed {
             color: #FFFFFF;
             background-color: transparent;
+        }
+
+        QPushButton#NavHistoryButton {
+            background-color: transparent;
+            border: none;
+            padding: 2px 10px;
+            color: #C6CED6;
+            font-size: 20px;
+            font-weight: 600;
+        }
+        QPushButton#NavHistoryButton:hover:enabled {
+            color: #FFFFFF;
+            background-color: transparent;
+        }
+        QPushButton#NavHistoryButton:disabled {
+            color: #4A4A4A;
         }
 
         /* Context bar (secondary) */

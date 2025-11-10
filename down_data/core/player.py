@@ -5,12 +5,13 @@ and analysis, with support for basic stats (1999+) and NextGen advanced metrics 
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import date
 import logging
 from pathlib import Path
 import re
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any
 
 import polars as pl
 from nflreadpy import load_ff_playerids, load_nextgen_stats, load_pbp, load_player_stats, load_players, load_teams
@@ -44,26 +45,26 @@ class PlayerProfile:
     """Immutable snapshot of key player metadata."""
 
     full_name: str
-    birth_date: Optional[date]
-    college: Optional[str]
-    nflverse_player_id: Optional[str]
-    gsis_id: Optional[str]
-    pfr_id: Optional[str]
-    pff_id: Optional[str]
-    espn_id: Optional[str]
-    sportradar_id: Optional[str]
-    esb_id: Optional[str]
-    otc_id: Optional[str]
-    height: Optional[int]
-    weight: Optional[int]
-    draft_year: Optional[int]
-    draft_round: Optional[int]
-    draft_pick: Optional[int]
-    draft_team: Optional[str]
-    position: Optional[str]
-    position_group: Optional[str]
+    birth_date: date | None
+    college: str | None
+    nflverse_player_id: str | None
+    gsis_id: str | None
+    pfr_id: str | None
+    pff_id: str | None
+    espn_id: str | None
+    sportradar_id: str | None
+    esb_id: str | None
+    otc_id: str | None
+    height: int | None
+    weight: int | None
+    draft_year: int | None
+    draft_round: int | None
+    draft_pick: int | None
+    draft_team: str | None
+    position: str | None
+    position_group: str | None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return the profile as a serialisable dictionary."""
 
         payload = asdict(self)
@@ -73,7 +74,7 @@ class PlayerProfile:
         return payload
 
     @staticmethod
-    def _parse_date(value: Any) -> Optional[date]:
+    def _parse_date(value: Any) -> date | None:
         if value is None or value == "":
             return None
         if isinstance(value, date):
@@ -87,7 +88,7 @@ class PlayerProfile:
         return None
 
     @staticmethod
-    def _parse_int(value: Any) -> Optional[int]:
+    def _parse_int(value: Any) -> int | None:
         if value is None or value == "":
             return None
         try:
@@ -97,7 +98,7 @@ class PlayerProfile:
             return None
 
     @staticmethod
-    def _first_non_empty(*values: Any) -> Optional[Any]:
+    def _first_non_empty(*values: Any) -> Any | None:
         for value in values:
             if value is None:
                 continue
@@ -107,7 +108,7 @@ class PlayerProfile:
         return None
 
     @classmethod
-    def from_row(cls, row: Dict[str, Any]) -> "PlayerProfile":
+    def from_row(cls, row: dict[str, Any]) -> "PlayerProfile":
         """Create a profile instance from a joined player row."""
 
         birth_date = cls._first_non_empty(row.get("birth_date"), row.get("birthdate"))
@@ -155,12 +156,12 @@ class PlayerQuery:
     """Criteria used to identify a player."""
 
     name: str
-    team: Optional[str] = None
-    draft_year: Optional[int] = None
-    draft_team: Optional[str] = None
-    position: Optional[str] = None
+    team: str | None = None
+    draft_year: int | None = None
+    draft_team: str | None = None
+    position: str | None = None
 
-    def normalised_position(self) -> Optional[str]:
+    def normalised_position(self) -> str | None:
         return self.position.lower() if self.position else None
 
     def __post_init__(self) -> None:
@@ -174,12 +175,12 @@ class PlayerQuery:
 class TeamDirectory:
     """Utility for normalising team identifiers to abbreviations."""
 
-    _mapping: Dict[str, str] | None = None
+    _mapping: dict[str, str] | None = None
 
     @classmethod
-    def _build_mapping(cls) -> Dict[str, str]:
+    def _build_mapping(cls) -> dict[str, str]:
         teams = load_teams()
-        mapping: Dict[str, str] = {}
+        mapping: dict[str, str] = {}
         for row in teams.unique(subset=["team"]).iter_rows(named=True):
             abbr = row.get("team")
             if not isinstance(abbr, str):
@@ -206,7 +207,7 @@ class TeamDirectory:
         return mapping
 
     @classmethod
-    def normalise(cls, value: Optional[str]) -> Optional[str]:
+    def normalise(cls, value: str | None) -> str | None:
         if value is None:
             return None
         value = value.strip()
@@ -276,7 +277,7 @@ class PlayerFinder:
     NAME_COLUMNS = ["display_name", "full_name", "football_name", "short_name", "name", "merge_name"]
 
     @classmethod
-    def resolve(cls, query: PlayerQuery) -> Dict[str, Any]:
+    def resolve(cls, query: PlayerQuery) -> dict[str, Any]:
         dataset = PlayerDataSource.combined()
         name_lower = query.name.lower()
         name_filters = [
@@ -351,11 +352,11 @@ class PlayerFinder:
         return resolved
 
     @staticmethod
-    def _tokenize(value: str) -> List[str]:
+    def _tokenize(value: str) -> list[str]:
         return [token for token in re.split(r"[^a-z0-9]+", value.lower()) if token]
 
     @classmethod
-    def _fallback_name_match(cls, dataset: pl.DataFrame, query: PlayerQuery) -> Optional[pl.DataFrame]:
+    def _fallback_name_match(cls, dataset: pl.DataFrame, query: PlayerQuery) -> pl.DataFrame | None:
         token_list = cls._tokenize(query.name)
         if not token_list:
             return None
@@ -368,7 +369,7 @@ class PlayerFinder:
                 pl.col("last_name").fill_null("").str.to_lowercase().str.contains(last_name)
             )
 
-        matched_rows: List[Dict[str, Any]] = []
+        matched_rows: list[dict[str, Any]] = []
         for row in narrowed.iter_rows(named=True):
             candidate_tokens: set[str] = set()
             for column in cls.NAME_COLUMNS:
@@ -384,7 +385,7 @@ class PlayerFinder:
         return pl.DataFrame(matched_rows)
 
     @staticmethod
-    def _choose_most_notable(candidates: pl.DataFrame) -> Dict[str, Any]:
+    def _choose_most_notable(candidates: pl.DataFrame) -> dict[str, Any]:
         scoring = candidates.with_columns(
             pl.when(pl.col("status") == "ACT").then(1).otherwise(0).alias("_active_score"),
             pl.col("years_of_experience").fill_null(0).alias("_experience_score"),
@@ -419,15 +420,15 @@ class Player:
         self,
         *,
         name: str,
-        team: Optional[str] = None,
-        draft_year: Optional[int] = None,
-        draft_team: Optional[str] = None,
-        position: Optional[str] = None,
+        team: str | None = None,
+        draft_year: int | None = None,
+        draft_team: str | None = None,
+        position: str | None = None,
     ) -> None:
         self.query = PlayerQuery(name=name, team=team, draft_year=draft_year, draft_team=draft_team, position=position)
         self._raw_row = PlayerFinder.resolve(self.query)
         self.profile = PlayerProfile.from_row(self._raw_row)
-        self._cache: Dict[str, Any] = {}
+        self._cache: dict[str, Any] = {}
 
     def to_rich_table(self):
         """Render the player's profile as a Rich table."""
@@ -449,35 +450,31 @@ class Player:
             table.add_row(field, display)
         return table
 
-    def info(self) -> Dict[str, Any]:
+    def info(self) -> dict[str, Any]:
         """Return the stored profile information."""
 
         return self.profile.to_dict()
 
     @staticmethod
-    def validate_seasons(seasons: Optional[Iterable[int]] = None) -> tuple[List[int], List[int]]:
+    def validate_seasons(
+        seasons: Iterable[int] | None = None,
+        *,
+        earliest: int = EARLIEST_SEASON_AVAILABLE,
+        latest: int = LATEST_SEASON_AVAILABLE,
+    ) -> tuple[list[int], list[int]]:
         """Split requested seasons into valid and invalid collections."""
 
         if seasons is None:
             return ([], [])
 
         season_list = list(seasons)
-        valid = [season for season in season_list if EARLIEST_SEASON_AVAILABLE <= season <= LATEST_SEASON_AVAILABLE]
-        valid_set = set(valid)
-        invalid = [season for season in season_list if season not in valid_set]
+        valid = [season for season in season_list if earliest <= season <= latest]
+        invalid = [season for season in season_list if season < earliest or season > latest]
         return (valid, invalid)
     
     @staticmethod
-    def _prepare_season_param(seasons: Union[None, bool, Iterable[int]]) -> Union[None, bool, List[int]]:
-        """
-        Helper to prepare seasons parameter for nflreadpy functions.
-        
-        Args:
-            seasons: None, True (all seasons), or iterable of specific seasons.
-        
-        Returns:
-            None, True, or list of seasons ready for nflreadpy.
-        """
+    def _prepare_season_param(seasons: bool | Iterable[int] | None) -> bool | list[int] | None:
+        """Normalise season filters for nflreadpy functions."""
         if seasons is None or seasons is True:
             return seasons
         return list(seasons)
@@ -485,37 +482,21 @@ class Player:
     def fetch_stats(
         self,
         *,
-        seasons: Union[None, bool, Iterable[int]] = None,
-        season_type: Optional[str] = None,
+        seasons: bool | Iterable[int] | None = None,
+        season_type: str | None = None,
     ) -> pl.DataFrame:
-        """
-        Load player stats using nflreadpy and cache the result.
-        
-        Args:
-            seasons: Season(s) to load. If None, loads current season.
-                    If True, loads all available seasons.
-                    Only seasons from 1999-2025 are available.
-            season_type: Optional filter by season type ("REG", "POST", "PRE").
-        
-        Returns:
-            Polars DataFrame with player statistics.
-            
-        Raises:
-            SeasonNotAvailableError: If any requested season is outside the available range.
-        """
-        # Validate seasons if provided (but not if True which means "all seasons")
-        if seasons is not None and seasons is not True:
+        """Return nflverse player stats for the supplied season filters."""
+
+        if seasons not in (None, True):
             valid_seasons, invalid_seasons = self.validate_seasons(seasons)
-            
             if invalid_seasons:
                 raise SeasonNotAvailableError(
-                    f"The following seasons are not available in nflverse data: {invalid_seasons}. "
-                    f"Player stats are only available from {EARLIEST_SEASON_AVAILABLE} to {LATEST_SEASON_AVAILABLE}. "
-                    f"Player profile data (name, draft info, etc.) is available for all players, "
-                    f"but weekly/seasonal stats are limited to {EARLIEST_SEASON_AVAILABLE} onwards."
+                    "Stats are available from "
+                    f"{EARLIEST_SEASON_AVAILABLE} to {LATEST_SEASON_AVAILABLE}; "
+                    f"invalid seasons requested: {invalid_seasons}."
                 )
 
-        params: Dict[str, Any] = {}
+        params: dict[str, Any] = {}
         prepared_seasons = self._prepare_season_param(seasons)
         if prepared_seasons is not None:
             params["seasons"] = prepared_seasons
@@ -537,7 +518,7 @@ class Player:
                 ) from e
             raise
 
-    def cached_stats(self) -> Optional[pl.DataFrame]:
+    def cached_stats(self) -> pl.DataFrame | None:
         """Return cached stats if they have been fetched previously."""
 
         return self._cache.get("stats")
@@ -545,47 +526,25 @@ class Player:
     def fetch_nextgen_stats(
         self,
         *,
-        seasons: Union[None, bool, Iterable[int]] = None,
+        seasons: bool | Iterable[int] | None = None,
         stat_type: str = "passing",
     ) -> pl.DataFrame:
-        """
-        Load NFL Next Gen Stats (2016+ only).
-        
-        NextGen Stats are NFL's official advanced tracking metrics that use player
-        tracking data to provide insights like average cushion, separation, time to throw,
-        efficiency metrics, and more.
-        
-        Args:
-            seasons: Season(s) to load. If None, loads current season.
-                    If True, loads all available seasons.
-                    Must be 2016 or later for NextGen Stats.
-            stat_type: Type of stats to load:
-                - "passing": Advanced passing metrics (time to throw, aggressiveness, etc.)
-                - "rushing": Advanced rushing metrics (rush yards over expected, efficiency, etc.)
-                - "receiving": Advanced receiving metrics (avg separation, cushion, catch %, etc.)
-        
-        Returns:
-            Polars DataFrame with NFL NextGen Statistics.
-            
-        Raises:
-            SeasonNotAvailableError: If any requested season is before 2016.
-        """
-        # Validate seasons - must be 2016+ (but not if True which means "all seasons")
-        if seasons is not None and seasons is not True:
-            valid_base, invalid_base = self.validate_seasons(seasons)
-            
-            # Check if any valid seasons are before 2016
-            invalid_nextgen = [s for s in valid_base if s < EARLIEST_NEXTGEN_SEASON]
-            
+        """Load NFL Next Gen Stats data (available from 2016 onwards)."""
+
+        if seasons not in (None, True):
+            valid_base, invalid_base = self.validate_seasons(
+                seasons, earliest=EARLIEST_SEASON_AVAILABLE, latest=LATEST_SEASON_AVAILABLE
+            )
+            invalid_nextgen = [season for season in valid_base if season < EARLIEST_NEXTGEN_SEASON]
             if invalid_base or invalid_nextgen:
-                all_invalid = invalid_base + invalid_nextgen
+                invalid = sorted(set(invalid_base + invalid_nextgen))
                 raise SeasonNotAvailableError(
-                    f"NextGen Stats are only available from {EARLIEST_NEXTGEN_SEASON} to {LATEST_SEASON_AVAILABLE}. "
-                    f"Invalid seasons requested: {sorted(set(all_invalid))}. "
-                    f"For basic stats from 1999-2015, use fetch_stats() instead."
+                    "Next Gen Stats are available from "
+                    f"{EARLIEST_NEXTGEN_SEASON} to {LATEST_SEASON_AVAILABLE}; "
+                    f"invalid seasons requested: {invalid}."
                 )
-        
-        params: Dict[str, Any] = {"stat_type": stat_type}
+
+        params: dict[str, Any] = {"stat_type": stat_type}
         prepared_seasons = self._prepare_season_param(seasons)
         if prepared_seasons is not None:
             params["seasons"] = prepared_seasons
@@ -614,7 +573,7 @@ class Player:
                 ) from e
             raise
 
-    def cached_nextgen_stats(self, stat_type: str = "passing") -> Optional[pl.DataFrame]:
+    def cached_nextgen_stats(self, stat_type: str = "passing") -> pl.DataFrame | None:
         """Return cached NextGen stats if they have been fetched previously."""
         cache_key = f"nextgen_stats_{stat_type}"
         return self._cache.get(cache_key)
@@ -622,116 +581,74 @@ class Player:
     def fetch_pfr_advanced_stats(
         self,
         *,
-        seasons: Union[None, Iterable[int]] = None,
+        seasons: Iterable[int] | None = None,
         stat_type: str = "passing",
     ) -> pl.DataFrame:
-        """
-        Load Pro Football Reference Advanced Stats from local CSV files (2018-2024).
-        
-        PFR Advanced Stats provide detailed film room analytics including:
-        - Passing: Air yards breakdown (IAY/CAY/YAC), accuracy metrics, pocket time, pressure
-        - Rushing: Yards before/after contact, broken tackles
-        - Receiving: Target quality, ADOT, YBC/YAC breakdown, drops
-        - Defense: Coverage stats, pass rush metrics, missed tackles
-        
-        Args:
-            seasons: Season(s) to load. If None, loads all available seasons (2018-2024).
-                    Only seasons from 2018-2024 are available.
-            stat_type: Type of stats to load:
-                - "passing": Advanced passing metrics
-                - "rushing": Advanced rushing metrics
-                - "receiving": Advanced receiving metrics
-                - "defense": Advanced defensive metrics
-        
-        Returns:
-            Polars DataFrame with PFR Advanced Statistics.
-            
-        Raises:
-            SeasonNotAvailableError: If any requested season is outside 2018-2024.
-            FileNotFoundError: If CSV files are missing.
-            ValueError: If player doesn't have a PFR ID.
-        """
-        # Validate player has PFR ID
+        """Load PFR advanced stats from local CSV exports (available 2018–2024)."""
+
         if not self.profile.pfr_id:
             raise ValueError(
-                f"Player {self.profile.full_name} does not have a Pro Football Reference ID. "
-                "PFR advanced stats require a valid PFR ID for matching."
+                f"Player {self.profile.full_name} does not have a Pro Football Reference ID."
             )
-        
-        # Validate seasons
+
         if seasons is None:
-            # Load all available PFR seasons
             seasons_to_load = list(range(EARLIEST_PFR_SEASON, LATEST_PFR_SEASON + 1))
         else:
             seasons_to_load = list(seasons)
-            invalid_seasons = [s for s in seasons_to_load if s < EARLIEST_PFR_SEASON or s > LATEST_PFR_SEASON]
-            
+            invalid_seasons = [
+                season for season in seasons_to_load if season < EARLIEST_PFR_SEASON or season > LATEST_PFR_SEASON
+            ]
             if invalid_seasons:
                 raise SeasonNotAvailableError(
-                    f"PFR Advanced Stats are only available from {EARLIEST_PFR_SEASON} to {LATEST_PFR_SEASON}. "
-                    f"Invalid seasons requested: {invalid_seasons}."
+                    "PFR advanced stats are available from "
+                    f"{EARLIEST_PFR_SEASON} to {LATEST_PFR_SEASON}; "
+                    f"invalid seasons requested: {invalid_seasons}."
                 )
-        
-        # Map stat_type to file prefix
+
         file_prefix_map = {
             "passing": "pfr_passing_advanced",
             "rushing": "pfr_rushing_advanced",
             "receiving": "pfr_receiving_advanced",
             "defense": "pfr_defense_advanced",
         }
-        
         if stat_type not in file_prefix_map:
-            raise ValueError(
-                f"Invalid stat_type '{stat_type}'. Must be one of: {list(file_prefix_map.keys())}"
-            )
-        
+            options = ", ".join(file_prefix_map)
+            raise ValueError(f"Invalid stat_type '{stat_type}'. Choose one of: {options}.")
         file_prefix = file_prefix_map[stat_type]
-        
-        # Load and combine data from all requested seasons
-        all_data = []
+
+        collected: list[pl.DataFrame] = []
         for season in seasons_to_load:
             csv_path = PFR_DATA_DIR / f"{file_prefix}_{season}.csv"
-            
             if not csv_path.exists():
-                logger.warning(f"PFR CSV file not found: {csv_path}")
+                logger.warning("PFR CSV file not found: %s", csv_path)
                 continue
-            
             try:
-                # Read CSV and add season column
-                df = pl.read_csv(csv_path)
-                
-                # The last column is the PFR ID (column name is -9999)
-                # Filter to this player's PFR ID
-                pfr_id_col = df.columns[-1]
-                player_data = df.filter(pl.col(pfr_id_col) == self.profile.pfr_id)
-                
-                if player_data.height > 0:
-                    # Add season column
-                    player_data = player_data.with_columns(pl.lit(season).alias("season"))
-                    all_data.append(player_data)
-                    
-            except Exception as e:
-                logger.warning(f"Error reading {csv_path}: {e}")
+                dataframe = pl.read_csv(csv_path)
+            except Exception as exc:  # pragma: no cover - I/O errors depend on deployment
+                logger.warning("Error reading %s: %s", csv_path, exc)
                 continue
-        
-        if not all_data:
-            # Return empty DataFrame with proper schema
+
+            pfr_id_column = dataframe.columns[-1]
+            player_data = dataframe.filter(pl.col(pfr_id_column) == self.profile.pfr_id)
+            if player_data.height > 0:
+                collected.append(player_data.with_columns(pl.lit(season).alias("season")))
+
+        if not collected:
             logger.info(
-                f"No PFR {stat_type} data found for {self.profile.full_name} "
-                f"(PFR ID: {self.profile.pfr_id}) in seasons {seasons_to_load}"
+                "No PFR %s data found for %s (%s) in seasons %s",
+                stat_type,
+                self.profile.full_name,
+                self.profile.pfr_id,
+                seasons_to_load,
             )
             return pl.DataFrame()
-        
-        # Combine all seasons
-        combined = pl.concat(all_data, how="vertical_relaxed")
-        
-        # Cache the result
+
+        combined = pl.concat(collected, how="vertical_relaxed")
         cache_key = f"pfr_stats_{stat_type}"
         self._cache[cache_key] = combined
-        
         return combined
 
-    def cached_pfr_stats(self, stat_type: str = "passing") -> Optional[pl.DataFrame]:
+    def cached_pfr_stats(self, stat_type: str = "passing") -> pl.DataFrame | None:
         """Return cached PFR stats if they have been fetched previously."""
         cache_key = f"pfr_stats_{stat_type}"
         return self._cache.get(cache_key)
@@ -739,72 +656,33 @@ class Player:
     def fetch_pbp(
         self,
         *,
-        seasons: Union[None, bool, Iterable[int]] = None,
+        seasons: bool | Iterable[int] | None = None,
     ) -> pl.DataFrame:
-        """
-        Load play-by-play data for all plays involving this player (1999-2025).
-        
-        Returns every play where the player was involved in any capacity:
-        - Offensive plays: passer, rusher, receiver, lateral receiver
-        - Defensive plays: tackler, pass defender, interception, fumble recovery
-        - Special teams: kicker, punter, returner, etc.
-        
-        Each row represents a single play with full game context including:
-        - Score, time remaining, field position
-        - Down, distance, quarter
-        - Play outcome (yards gained, touchdown, etc.)
-        - EPA, WPA, success metrics
-        
-        Args:
-            seasons: Season(s) to load. If None, loads current season.
-                    If True, loads all available seasons (1999-2025).
-                    
-        Returns:
-            Polars DataFrame with all plays involving this player.
-            
-        Raises:
-            SeasonNotAvailableError: If any requested season is outside 1999-2025.
-            
-        Note:
-            Data quality varies by era:
-            - 2016-2025: Excellent player attribution (~98-99%)
-            - 2011-2015: Good player attribution (~95%)
-            - 2006-2010: Moderate (~80-85%)
-            - 1999-2005: Limited (~60-70%, many missing player IDs)
-            
-            Defensive player attribution is sparse across all seasons (~11.5% of plays).
-        """
-        # Validate seasons if provided
-        if seasons is not None and seasons is not True:
-            valid_seasons, invalid_seasons = self.validate_seasons(seasons)
-            
+        """Load play-by-play data that references this player."""
+
+        if seasons not in (None, True):
+            _, invalid_seasons = self.validate_seasons(seasons)
             if invalid_seasons:
                 raise SeasonNotAvailableError(
-                    f"The following seasons are not available: {invalid_seasons}. "
-                    f"Play-by-play data is only available from {EARLIEST_SEASON_AVAILABLE} to {LATEST_SEASON_AVAILABLE}."
+                    "Play-by-play data is available from "
+                    f"{EARLIEST_SEASON_AVAILABLE} to {LATEST_SEASON_AVAILABLE}; "
+                    f"invalid seasons requested: {invalid_seasons}."
                 )
-        
-        # Load play-by-play data
+
         try:
             pbp = load_pbp(seasons=self._prepare_season_param(seasons))
-        except ConnectionError as e:
-            raise SeasonNotAvailableError(
-                f"Failed to download play-by-play data. {str(e)}"
-            ) from e
-        
-        # Filter to plays where this player was involved
-        # Check all possible player ID columns
+        except ConnectionError as exc:  # pragma: no cover - network error
+            raise SeasonNotAvailableError("Failed to download play-by-play data.") from exc
+
         player_id = self.profile.gsis_id
-        
-        # Build filter for all player involvement columns
+        if not player_id:
+            logger.info("Player %s has no GSIS ID; returning empty play-by-play frame.", self.profile.full_name)
+            return pl.DataFrame()
         player_filters = [
-            # Offensive players
             pl.col("passer_player_id") == player_id,
             pl.col("rusher_player_id") == player_id,
             pl.col("receiver_player_id") == player_id,
             pl.col("lateral_receiver_player_id") == player_id,
-            
-            # Defensive players - tackles
             pl.col("solo_tackle_1_player_id") == player_id,
             pl.col("solo_tackle_2_player_id") == player_id,
             pl.col("assist_tackle_1_player_id") == player_id,
@@ -819,115 +697,77 @@ class Player:
             pl.col("sack_player_id") == player_id,
             pl.col("half_sack_1_player_id") == player_id,
             pl.col("half_sack_2_player_id") == player_id,
-            
-            # Fumble plays
             pl.col("fumbled_1_player_id") == player_id,
             pl.col("fumbled_2_player_id") == player_id,
             pl.col("fumble_recovery_1_player_id") == player_id,
             pl.col("fumble_recovery_2_player_id") == player_id,
             pl.col("forced_fumble_player_1_player_id") == player_id,
             pl.col("forced_fumble_player_2_player_id") == player_id,
-            
-            # Special teams
             pl.col("kicker_player_id") == player_id,
             pl.col("punter_player_id") == player_id,
             pl.col("kickoff_returner_player_id") == player_id,
             pl.col("punt_returner_player_id") == player_id,
-            
-            # Penalties
             pl.col("penalty_player_id") == player_id,
         ]
-        
-        # Combine all filters with OR
+
         player_plays = pbp.filter(pl.any_horizontal(player_filters))
-        
-        # Cache the result
         self._cache["pbp"] = player_plays
-        
+
         logger.info(
-            f"Loaded {player_plays.height} plays for {self.profile.full_name} "
-            f"across {player_plays['season'].n_unique()} season(s)"
+            "Loaded %s plays for %s across %s season(s)",
+            player_plays.height,
+            self.profile.full_name,
+            player_plays["season"].n_unique() if "season" in player_plays.columns else "unknown",
         )
-        
+
         return player_plays
 
-    def cached_pbp(self) -> Optional[pl.DataFrame]:
+    def cached_pbp(self) -> pl.DataFrame | None:
         """Return cached play-by-play data if it has been fetched previously."""
         return self._cache.get("pbp")
 
     def fetch_coverage_stats(
         self,
         *,
-        seasons: Union[None, bool, Iterable[int]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Extract partial coverage stats from play-by-play data (DEFENSIVE PLAYERS ONLY).
-        
-        ⚠️ **IMPORTANT LIMITATION**: This data is INCOMPLETE.
-        
-        The nflverse play-by-play data only includes defender attribution on ~11.5% of pass
-        plays (typically when the defender made a specific play like a pass breakup or
-        interception). This is NOT comprehensive coverage tracking.
-        
-        For complete coverage stats (times targeted, completion % allowed, etc.), you
-        would need:
-        - Pro Football Focus (PFF) subscription data
-        - Sports Info Solutions data
-        - Manual film charting
-        
-        This method provides whatever limited data IS available, which can serve as a
-        rough proxy for defensive involvement, but should NOT be interpreted as complete
-        coverage statistics.
-        
-        Args:
-            seasons: Season(s) to analyze. If None, uses current season. If True, all seasons.
-        
-        Returns:
-            Dictionary with partial coverage stats:
-            - plays_credited: # of plays where defender was identified (NOT total targets)
-            - completions_allowed: Completions on those plays
-            - yards_allowed: Yards on those plays
-            - tds_allowed: TDs on those plays
-            - interceptions: INTs by this defender
-            - pass_breakups: Estimated from incomplete passes
-            - note: Warning about data limitations
-        
-        Example:
-            >>> cb = Player(name="Trevon Diggs", position="CB")
-            >>> coverage = cb.fetch_coverage_stats(seasons=[2023])
-            >>> print(coverage['plays_credited'])  # NOT comprehensive target count
-            >>> print(coverage['note'])  # Read the limitations!
-        """
+        seasons: bool | Iterable[int] | None = None,
+    ) -> dict[str, Any]:
+        """Derive partial coverage stats from play-by-play data."""
+
         if not self.is_defensive():
             logger.warning(
                 f"{self.profile.full_name} is not a defensive player (position: {self.profile.position}). "
                 "Coverage stats are only relevant for defensive players."
             )
         
-        # Validate and prepare seasons
-        if seasons is not None and seasons is not True:
-            valid_seasons, invalid_seasons = self.validate_seasons(seasons)
+        if seasons not in (None, True):
+            _, invalid_seasons = self.validate_seasons(seasons)
             if invalid_seasons:
                 raise SeasonNotAvailableError(
-                    f"The following seasons are not available: {invalid_seasons}. "
-                    f"Play-by-play data is only available from {EARLIEST_SEASON_AVAILABLE} to {LATEST_SEASON_AVAILABLE}."
+                    "Play-by-play data is available from "
+                    f"{EARLIEST_SEASON_AVAILABLE} to {LATEST_SEASON_AVAILABLE}; "
+                    f"invalid seasons requested: {invalid_seasons}."
                 )
-        
-        # Load play-by-play data
+
         try:
             pbp = load_pbp(seasons=self._prepare_season_param(seasons))
-        except ConnectionError as e:
-            raise SeasonNotAvailableError(
-                f"Failed to download play-by-play data. {str(e)}"
-            ) from e
-        
-        # Filter to pass plays where this player was credited as defender
+        except ConnectionError as exc:  # pragma: no cover - network error
+            raise SeasonNotAvailableError("Failed to download play-by-play data.") from exc
+
         player_id = self.profile.gsis_id
+        if not player_id:
+            return {
+                "plays_credited": 0,
+                "completions_allowed": 0,
+                "yards_allowed": 0,
+                "tds_allowed": 0,
+                "interceptions": 0,
+                "pass_breakups": 0,
+                "note": "Player does not have a GSIS ID; coverage stats are unavailable.",
+            }
         coverage_plays = pbp.filter(
-            (pl.col("pass_defense_1_player_id") == player_id) |
-            (pl.col("pass_defense_2_player_id") == player_id)
+            (pl.col("pass_defense_1_player_id") == player_id)
+            | (pl.col("pass_defense_2_player_id") == player_id)
         )
-        
         if coverage_plays.height == 0:
             return {
                 "plays_credited": 0,
@@ -937,43 +777,27 @@ class Player:
                 "interceptions": 0,
                 "pass_breakups": 0,
                 "note": (
-                    "⚠️ WARNING: No plays found with defender attribution. "
-                    "This does NOT mean the player had no coverage snaps. "
-                    "NFLverse PBP data only tracks defenders on ~11.5% of pass plays "
-                    "(plays with defensive events like breakups/INTs). "
-                    "For comprehensive coverage stats, use Pro Football Focus or manual charting."
-                )
+                    "No plays with defender attribution were recorded. "
+                    "NFLverse data only attributes defenders on roughly 11% of pass plays, "
+                    "so this is not a full coverage log."
+                ),
             }
-        
-        # Calculate available stats from the limited data
-        plays_credited = coverage_plays.height
-        
-        completions = coverage_plays.filter(pl.col("complete_pass") == 1).height
-        yards = coverage_plays.select(pl.col("yards_gained").fill_null(0).sum()).item()
-        tds = coverage_plays.filter(pl.col("pass_touchdown") == 1).height
-        ints = coverage_plays.filter(pl.col("interception") == 1).height
-        
-        # Pass breakups = incomplete passes that weren't INTs
+
+        yards_total = coverage_plays.select(pl.col("yards_gained").fill_null(0).sum()).item()
         breakups = coverage_plays.filter(
-            (pl.col("incomplete_pass") == 1) & 
-            (pl.col("interception") == 0)
+            (pl.col("incomplete_pass") == 1) & (pl.col("interception") == 0)
         ).height
-        
         return {
-            "plays_credited": plays_credited,
-            "completions_allowed": completions,
-            "yards_allowed": float(yards) if yards else 0.0,
-            "tds_allowed": tds,
-            "interceptions": ints,
+            "plays_credited": coverage_plays.height,
+            "completions_allowed": coverage_plays.filter(pl.col("complete_pass") == 1).height,
+            "yards_allowed": float(yards_total) if yards_total else 0.0,
+            "tds_allowed": coverage_plays.filter(pl.col("pass_touchdown") == 1).height,
+            "interceptions": coverage_plays.filter(pl.col("interception") == 1).height,
             "pass_breakups": breakups,
             "note": (
-                f"⚠️ WARNING: This data is INCOMPLETE. "
-                f"Only {plays_credited} plays found where defender was credited. "
-                f"NFL PBP data only tracks defenders on ~11.5% of pass plays. "
-                f"This is NOT a complete target count. "
-                f"For comprehensive coverage stats (times targeted, completion % allowed, etc.), "
-                f"you need Pro Football Focus or Sports Info Solutions data."
-            )
+                "Coverage stats derive from nflverse defender attributions and are incomplete. "
+                "Treat counts as lower bounds rather than totals."
+            ),
         }
 
     def is_defensive(self) -> bool:
@@ -992,24 +816,15 @@ class Player:
     def get_career_stats(
         self,
         *,
-        seasons: Union[None, bool, Iterable[int]] = None,
-        season_type: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Calculate career totals for key statistics.
-        
-        Args:
-            seasons: Season(s) to include. If None, uses current season. If True, all seasons.
-            season_type: Optional filter ("REG", "POST", "PRE").
-        
-        Returns:
-            Dictionary of career stat totals.
-        """
+        seasons: bool | Iterable[int] | None = None,
+        season_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Calculate career totals for key statistics."""
         stats = self.fetch_stats(seasons=seasons, season_type=season_type)
         if stats.height == 0:
             return {}
 
-        totals: Dict[str, Any] = {"games_played": stats.height}
+        totals: dict[str, Any] = {"games_played": stats.height}
 
         if self.is_defensive():
             # Defensive stat aggregations
@@ -1052,7 +867,7 @@ class Player:
 
         return totals
 
-    def get_relevant_stat_columns(self) -> List[str]:
+    def get_relevant_stat_columns(self) -> list[str]:
         """Return a list of stat column names relevant to this player's position."""
 
         base_columns = ["season", "week", "team", "opponent_team"]
@@ -1096,7 +911,7 @@ class Player:
         return mapping.get(position, "passing")
 
     @staticmethod
-    def _build_aggregation_exprs(df: pl.DataFrame, exclude_cols: set[str]) -> List[pl.Expr]:
+    def _build_aggregation_exprs(df: pl.DataFrame, exclude_cols: set[str]) -> list[pl.Expr]:
         """
         Build Polars aggregation expressions for season-level stats.
         
@@ -1135,35 +950,11 @@ class Player:
     def get_master_stats_table(
         self,
         *,
-        seasons: Union[None, Iterable[int]] = None,
+        seasons: Iterable[int] | None = None,
         include_nextgen: bool = True,
         include_playoffs: bool = True,
     ) -> Any:  # Returns pd.DataFrame
-        """
-        Generate a comprehensive master stats table for the player.
-        
-        Returns one row per season with all available stat categories as columns.
-        This aggregates weekly stats to season totals/averages for a complete
-        career overview.
-        
-        Args:
-            seasons: Seasons to include. If None, fetches all available seasons.
-            include_nextgen: If True and seasons >= 2016, includes NextGen advanced stats.
-            include_playoffs: If True, includes playoff stats. If False, regular season only.
-        
-        Returns:
-            Pandas DataFrame with one row per season and all stat categories as columns.
-            Includes basic stats (1999+) and optionally NextGen stats (2016+).
-        
-        Example:
-            >>> player = Player(name="Patrick Mahomes")
-            >>> master_table = player.get_master_stats_table()
-            >>> print(master_table)
-               season  games  passing_yards  passing_tds  ...  avg_time_to_throw  aggressiveness
-            0    2018     17          5097           50  ...               2.85            8.5
-            1    2019     14          4031           26  ...               2.92            7.8
-            ...
-        """
+        """Aggregate per-season stats (and optional Next Gen data) into a single table."""
         try:
             import pandas as pd
         except ImportError:
@@ -1270,7 +1061,7 @@ class Player:
         
         return master_df
 
-    def get_relevant_nextgen_columns(self, stat_type: Optional[str] = None) -> List[str]:
+    def get_relevant_nextgen_columns(self, stat_type: str | None = None) -> list[str]:
         """
         Return relevant NextGen stat columns based on stat type.
         

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
-
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHeaderView, QTableWidget, QTableWidgetItem, QWidget
 
@@ -38,8 +36,8 @@ class TablePanel(ContentPanel):
     def __init__(
         self,
         *,
-        title: Optional[str] = None,
-        columns: Optional[List[str]] = None,
+        title: str | None = None,
+        columns: list[str] | None = None,
         sortable: bool = True,
         alternating_rows: bool = True,
         parent: QWidget | None = None,
@@ -75,7 +73,7 @@ class TablePanel(ContentPanel):
     
     # Data Management API -------------------------------------------------------
     
-    def set_columns(self, columns: List[str]) -> None:
+    def set_columns(self, columns: list[str]) -> None:
         """Set column headers.
         
         Args:
@@ -90,7 +88,7 @@ class TablePanel(ContentPanel):
         for i in range(len(columns) - 1):
             header.setSectionResizeMode(i, QHeaderView.ResizeToContents)
     
-    def add_row(self, data: List[str]) -> None:
+    def add_row(self, data: list[str]) -> None:
         """Add a single row of data.
         
         Args:
@@ -108,7 +106,7 @@ class TablePanel(ContentPanel):
             
             self._table.setItem(row_position, col, item)
     
-    def set_data(self, rows: List[List[str]]) -> None:
+    def set_data(self, rows: list[list[str]]) -> None:
         """Set all table data at once (replaces existing data).
         
         Args:
@@ -134,7 +132,7 @@ class TablePanel(ContentPanel):
         except (ValueError, AttributeError):
             return False
     
-    def set_column_widths(self, widths: List[int]) -> None:
+    def set_column_widths(self, widths: list[int]) -> None:
         """Set explicit column widths in pixels.
         
         Args:
@@ -160,7 +158,7 @@ class TablePanel(ContentPanel):
 def create_stats_table(
     *,
     title: str,
-    stat_columns: List[str],
+    stat_columns: list[str],
     parent: QWidget | None = None,
 ) -> TablePanel:
     """Create a stats table with common configuration.
