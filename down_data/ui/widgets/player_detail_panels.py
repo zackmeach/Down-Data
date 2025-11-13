@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
@@ -15,15 +13,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-
-@dataclass(frozen=True)
-class RatingBreakdown:
-    """Container describing a rating with its current/potential values."""
-
-    label: str
-    current: int
-    potential: int
-    subratings: tuple["RatingBreakdown", ...] = ()
+from down_data.core.ratings import RatingBreakdown
 
 
 class PersonalDetailsWidget(QWidget):

@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import date, datetime
 import logging
 import math
-import random
 from typing import Any
 
 import polars as pl
@@ -20,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from down_data.backend.player_service import PlayerService
-from down_data.core import PlayerQuery, PlayerNotFoundError, SeasonNotAvailableError
+from down_data.core import Player, PlayerQuery, PlayerNotFoundError, SeasonNotAvailableError
 from down_data.ui.widgets import (
     GridCell,
     GridLayoutManager,
@@ -29,7 +28,7 @@ from down_data.ui.widgets import (
     PersonalDetailsWidget,
     BasicRatingsWidget,
 )
-from down_data.ui.widgets.player_detail_panels import RatingBreakdown
+from down_data.core.ratings import RatingBreakdown
 
 from .base_page import SectionPage
 
@@ -179,6 +178,14 @@ class PlayerDetailSectionScaffold(QWidget):
         for row in rows:
             self._table_panel.add_row(row)
 
+    def update_table_columns(self, columns: list[str]) -> None:
+        """Update the table header/columns."""
+        if self._table_panel is None:
+            return
+        if not columns:
+            columns = ["Season", "Team", "Primary Pos", "Games", "Snaps"]
+        self._table_panel.set_columns(columns)
+
     def update_personal_details(self, details: list[tuple[str, str]]) -> None:
         if self._personal_details_widget is not None:
             self._personal_details_widget.set_details(details)
@@ -211,6 +218,10 @@ class PlayerDetailPage(SectionPage):
 
         self._service = service
         self._season_rows: list[list[str]] = []
+        self._table_columns: list[str] = ["Season", "Team", "Primary Pos", "Games", "Snaps"]
+        self._is_defensive: bool = False
+        self._current_player: Player | None = None
+        self._basic_ratings: list[RatingBreakdown] = []
 
         self._current_payload: dict[str, Any] | None = None
         self._active_section: str = self.PRIMARY_SECTIONS[0]
@@ -242,8 +253,10 @@ class PlayerDetailPage(SectionPage):
         """Store the latest payload and clear the content area for forthcoming layout."""
 
         self._current_payload = dict(payload) if payload is not None else None
+        self._current_player = None
+        self._season_rows = []
+        self._basic_ratings = []
         self._update_personal_details_views()
-        self._update_basic_ratings_views()
         self._load_player_stats()
         self._show_content(self._active_section, self._active_subsection)
 
@@ -252,6 +265,8 @@ class PlayerDetailPage(SectionPage):
 
         self._current_payload = None
         self._season_rows = []
+        self._current_player = None
+        self._basic_ratings = []
         self._update_personal_details_views()
         self._update_basic_ratings_views()
         self._update_table_views()
@@ -309,6 +324,7 @@ class PlayerDetailPage(SectionPage):
 
         for widget in self._content_panels.values():
             if isinstance(widget, PlayerDetailSectionScaffold):
+                widget.update_table_columns(self._table_columns)
                 widget.update_table_rows(self._season_rows)
 
     def _update_personal_details_views(self) -> None:
@@ -318,7 +334,7 @@ class PlayerDetailPage(SectionPage):
                 widget.update_personal_details(details)
 
     def _update_basic_ratings_views(self) -> None:
-        ratings = self._generate_basic_ratings()
+        ratings = self._basic_ratings if self._basic_ratings else []
         for widget in self._content_panels.values():
             if isinstance(widget, PlayerDetailSectionScaffold):
                 widget.update_basic_ratings(ratings)
@@ -479,60 +495,6 @@ class PlayerDetailPage(SectionPage):
 
         return details
 
-    def _generate_basic_ratings(self) -> list[RatingBreakdown]:
-        if not self._current_payload:
-            return []
-
-        seed_source = "|".join(
-            filter(
-                None,
-                [
-                    str(self._current_payload.get("full_name") or ""),
-                    str(self._current_payload.get("team") or ""),
-                    str(self._current_payload.get("position") or ""),
-                ],
-            )
-        )
-        rng = random.Random(seed_source)
-
-        categories = [
-            ("Athleticism", ("Speed", "Agility")),
-            ("Technical", ("Technique", "Vision")),
-            ("Intangibles", ("Awareness", "Leadership")),
-        ]
-
-        def sample_rating() -> int:
-            choices = [20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80]
-            return rng.choice(choices)
-
-        ratings: list[RatingBreakdown] = []
-        for label, sublabels in categories:
-            current = sample_rating()
-            potential = max(current, sample_rating())
-            subratings: list[RatingBreakdown] = []
-            for sublabel in sublabels:
-                delta = rng.choice([-10, -5, 0, 5, 10])
-                sub_current = self._clamp_rating(current + delta)
-                sub_potential = max(sub_current, self._clamp_rating(sub_current + rng.choice([0, 5, 10])))
-                subratings.append(
-                    RatingBreakdown(
-                        label=sublabel,
-                        current=sub_current,
-                        potential=sub_potential,
-                        subratings=(),
-                    )
-                )
-            ratings.append(
-                RatingBreakdown(
-                    label=label,
-                    current=current,
-                    potential=potential,
-                    subratings=tuple(subratings),
-                )
-            )
-
-        return ratings
-
     def _load_player_stats(self) -> None:
         """Fetch player stats and update table rows."""
 
@@ -553,29 +515,65 @@ class PlayerDetailPage(SectionPage):
         try:
             query = PlayerQuery(name=full_name, team=team or None, position=position or None)
             player = self._service.load_player(query)
-            stats = player.fetch_stats(seasons=True)
+            self._current_player = player
+            # Update table columns based on player side of ball
+            self._is_defensive = bool(getattr(player, "is_defensive")() if hasattr(player, "is_defensive") else False)
+            if self._is_defensive:
+                self._table_columns = [
+                    "Season",
+                    "Team",
+                    "Primary Pos",
+                    "Games",
+                    "Snaps",
+                    "Tackles",
+                    "Solo Tk",
+                    "Ast Tk",
+                    "INT",
+                ]
+            else:
+                self._table_columns = [
+                    "Season",
+                    "Team",
+                    "Primary Pos",
+                    "Games",
+                    "Snaps",
+                    "Pass Yds",
+                    "Rush Yds",
+                    "Rec Yds",
+                    "Total TD",
+                ]
+            stats = self._service.get_player_stats(player, seasons=True)
         except (PlayerNotFoundError, SeasonNotAvailableError) as exc:
             logger.debug("No stats available for %s: %s", full_name, exc)
             self._update_table_views()
+            self._basic_ratings = []
             return
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("Failed to load stats for %s: %s", full_name, exc)
             self._update_table_views()
+            self._basic_ratings = []
             return
 
         try:
-            self._season_rows = self._build_table_rows(stats)
+            self._season_rows, summary = self._build_table_rows(stats)
+            self._basic_ratings = self._service.get_basic_ratings(
+                player,
+                summary=summary,
+                is_defensive=self._is_defensive,
+            )
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("Failed to process stats for %s: %s", full_name, exc)
             self._season_rows = []
+            self._basic_ratings = []
 
         self._update_table_views()
+        self._update_basic_ratings_views()
 
-    def _build_table_rows(self, stats: pl.DataFrame) -> list[list[str]]:
-        """Transform raw stats into table-ready rows."""
+    def _build_table_rows(self, stats: pl.DataFrame) -> tuple[list[list[str]], dict[str, float]]:
+        """Transform raw stats into table-ready rows and summary metrics."""
 
         if stats is None or stats.height == 0:
-            return []
+            return [], {}
 
         data = stats
 
@@ -583,7 +581,7 @@ class PlayerDetailPage(SectionPage):
             data = data.filter(pl.col("season_type") == "REG")
 
         if data.height == 0 or "season" not in data.columns:
-            return []
+            return [], {}
 
         team_expr = (
             self._coalesce_expr(
@@ -645,6 +643,40 @@ class PlayerDetailPage(SectionPage):
         else:
             select_columns.append(pl.lit(None).alias("_week"))
 
+        select_columns.extend(
+            [
+                pl.col("_def_solo"),
+                pl.col("_def_ast"),
+                pl.col("_def_int"),
+                pl.col("_pass_yds"),
+                pl.col("_rush_yds"),
+                pl.col("_rec_yds"),
+                pl.col("_total_td"),
+            ]
+        )
+
+        # Build additional numeric metrics with safe defaults
+        def _num(col: str) -> pl.Expr:
+            return (
+                pl.col(col).cast(pl.Float64, strict=False).fill_null(0)
+                if col in data.columns
+                else pl.lit(0.0)
+            )
+
+        def_solo = _num("def_tackles_solo").alias("_def_solo")
+        def_ast_a = _num("def_tackle_assists")
+        def_ast_b = _num("def_tackles_with_assist")
+        def_ast = pl.sum_horizontal([def_ast_a, def_ast_b]).alias("_def_ast")
+        def_int = _num("def_interceptions").alias("_def_int")
+
+        pass_yds = _num("passing_yards").alias("_pass_yds")
+        rush_yds = _num("rushing_yards").alias("_rush_yds")
+        rec_yds = _num("receiving_yards").alias("_rec_yds")
+        pass_tds = _num("passing_tds")
+        rush_tds = _num("rushing_tds")
+        rec_tds = _num("receiving_tds")
+        total_td = pl.sum_horizontal([pass_tds, rush_tds, rec_tds]).alias("_total_td")
+
         prepared = (
             data.with_columns(
                 [
@@ -652,6 +684,13 @@ class PlayerDetailPage(SectionPage):
                     position_expr,
                     games_expr,
                     snap_expr,
+                    def_solo,
+                    def_ast,
+                    def_int,
+                    pass_yds,
+                    rush_yds,
+                    rec_yds,
+                    total_td,
                 ]
             )
             .select(select_columns)
@@ -674,6 +713,13 @@ class PlayerDetailPage(SectionPage):
                 pl.col("_games_raw").max().alias("_games_raw"),
                 pl.col("_week").drop_nulls().n_unique().alias("_games_from_weeks"),
                 pl.col("_snaps").sum().alias("_snaps"),
+                pl.col("_def_solo").sum().alias("_def_solo"),
+                pl.col("_def_ast").sum().alias("_def_ast"),
+                pl.col("_def_int").sum().alias("_def_int"),
+                pl.col("_pass_yds").sum().alias("_pass_yds"),
+                pl.col("_rush_yds").sum().alias("_rush_yds"),
+                pl.col("_rec_yds").sum().alias("_rec_yds"),
+                pl.col("_total_td").sum().alias("_total_td"),
             )
             .with_columns(
                 pl.when(pl.col("_games_raw") > 0)
@@ -696,16 +742,48 @@ class PlayerDetailPage(SectionPage):
             position_value = row.get("_position") or ""
             if not position_value:
                 position_value = self._infer_position_for_row(row, stats)
-            rows.append(
-                [
-                    self._format_value(row.get("season")),
-                    self._format_value(team_value),
-                    self._format_value(position_value),
-                    self._format_int(row.get("_games")),
-                    self._format_int(row.get("_snaps")),
+            base = [
+                self._format_value(row.get("season")),
+                self._format_value(team_value),
+                self._format_value(position_value),
+                self._format_int(row.get("_games")),
+                self._format_int(row.get("_snaps")),
+            ]
+            if self._is_defensive:
+                tackles_total = (row.get("_def_solo") or 0) + (row.get("_def_ast") or 0)
+                extra = [
+                    self._format_int(tackles_total),
+                    self._format_int(row.get("_def_solo")),
+                    self._format_int(row.get("_def_ast")),
+                    self._format_int(row.get("_def_int")),
                 ]
-            )
-        return rows
+            else:
+                extra = [
+                    self._format_int(row.get("_pass_yds")),
+                    self._format_int(row.get("_rush_yds")),
+                    self._format_int(row.get("_rec_yds")),
+                    self._format_int(row.get("_total_td")),
+                ]
+            rows.append(base + extra)
+        if self._is_defensive:
+            summary = {
+                "def_tackles_total": float((aggregated["_def_solo"].sum() or 0) + (aggregated["_def_ast"].sum() or 0)),
+                "def_tackles_solo": float(aggregated["_def_solo"].sum() or 0),
+                "def_tackles_assisted": float(aggregated["_def_ast"].sum() or 0),
+                "def_interceptions": float(aggregated["_def_int"].sum() or 0),
+                "games": float(aggregated["_games"].sum() or 0),
+                "snaps": float(aggregated["_snaps"].sum() or 0),
+            }
+        else:
+            summary = {
+                "pass_yards": float(aggregated["_pass_yds"].sum() or 0),
+                "rush_yards": float(aggregated["_rush_yds"].sum() or 0),
+                "receiving_yards": float(aggregated["_rec_yds"].sum() or 0),
+                "total_touchdowns": float(aggregated["_total_td"].sum() or 0),
+                "games": float(aggregated["_games"].sum() or 0),
+                "snaps": float(aggregated["_snaps"].sum() or 0),
+            }
+        return rows, summary
 
     def _infer_team_for_row(self, row: dict[str, Any], stats: pl.DataFrame) -> str:
         """Infer team abbreviation for a given season row when missing."""
