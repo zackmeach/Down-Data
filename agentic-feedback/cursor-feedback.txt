@@ -1,0 +1,41 @@
+Cursor Feedback Summary
+=======================
+
+Context
+-------
+- Reviewed `feedback_master.txt`, `feedback1_gpt5thinking.txt`, `feedback2_gpt5agent.txt`, `feedback3_gpt5agent.txt`, `feedback4_gpt5high.txt`, `feedback5_sonnet45.txt`, `feedback6_gpt5codex.txt`, and `feedback6_grok4.txt` line by line to consolidate the guidance driving our build.
+- The shared vision is an NFL-flavoured, OOTP-style desktop client that launches with a “Find A Player” workflow, keeps UI and data layers separate, embraces dark chrome styling, and pulls live data lazily via `nflreadpy`.
+
+How the current implementation maps to that vision
+--------------------------------------------------
+- Find Player first: `PlayerSearchPage` is the landing experience under `Players > Find A Player`, matching the recommendation to validate the end-to-end search → profile flow before expanding elsewhere.
+- OOTP-inspired layout: the custom `GridLayoutManager` (12×24 grid) plus stacked navigation bars (`NavBar`, `ContextBar`, `MenuBar`) mirror the double-bar + dense panel cadence called out across multiple feedback files.
+- Data/service split: the UI never calls `nflreadpy` directly; instead it talks to `PlayerService`, which wraps the cached `PlayerDirectory`, stats fetcher, and rating helpers. This follows the “gateway/service layer” guidance verbatim.
+- Lazy, cached data usage: `PlayerDirectory.frame` caches the nflverse player list on first access, the search page filters in memory, and heavy stats pulls are cached per player/season in `PlayerService.get_player_stats`, satisfying the “minimal local storage & on-demand fetch” requirement.
+- Reusable detail scaffold: `PlayerDetailPage` already exposes tab scaffolds for `Profile | Stats | History`, lazy-loads stats per player, and surfaces placeholder panels so we can slot in contract/injury/game-log content once sources solidify—matching the recommendation to ship the shell even if some data is stubbed.
+
+Intentional divergences (and why)
+---------------------------------
+- Rich contract filters today: the finder exposes contract-related controls even though nflverse does not provide those columns. I kept them to prove the UI layout, but they currently operate on sparse data. Plan is to backfill once we integrate a contracts provider (Spotrac/OTC/etc.).
+- Navigation context manager: instead of a simple stacked widget swap, `ContentPage` manages history-aware navigation contexts (default vs player detail) so the OOTP-style back/forward/home buttons behave like the screenshots. This adds complexity now but will save churn when new sections arrive.
+- Ratings baseline computation: implemented a 20–80 style rating system driven by nflverse stats. Several agents recommended placeholders; I chose to ship a lightweight calculation so the ratings panel already feels alive.
+- Desktop chrome enforcement: we enforce a 16:9 window and auto-maximise on launch. Not explicitly requested, but it keeps layouts stable while the dense grid comes together.
+
+Areas still in flux
+-------------------
+- Contract & injury tabs are placeholders; they currently present context text and empty tables until we ingest reliable datasets (aligns with the “ship honest placeholders” advice).
+- Search uses synchronous filtering on the cached frame; moving the heavier filtering work into background threads and adding incremental loading are next on the UI polish list.
+- Preview card/right pane on the search page is still TODO; the grid has reserved space so we can add it without rework.
+- README and developer docs are being updated to reflect the current architecture, module layout, and data flow (in progress).
+
+Next steps inferred from feedback
+---------------------------------
+- Wire in asynchronous workers for search and stats loading so the UI never stutters when nflverse responses lag.
+- Populate the stats/game-log/streak scaffolds with dedicated table models per feedback, using the existing `PlayerService.get_player_stats` cache.
+- Integrate an external contract dataset or provide a fixtures file so the contract tab and filters become truthful.
+- Fill the history/accomplishments tab with aggregated awards or placeholders informed by nflverse + manual data, as multiple agents suggested.
+
+Summary
+-------
+The current build honours the shared agent guidance by centring the Find Player journey, preserving an OOTP-style visual rhythm, and isolating nflverse access behind a thin service layer. Where we diverged (extra contract controls, bespoke navigation state machine, early rating computation) the goal was to keep the UI scaffolding future-proof while acknowledging data gaps. Remaining work largely matches the collective roadmap: finish tab content, improve responsiveness, and tighten the developer-facing documentation.
+
