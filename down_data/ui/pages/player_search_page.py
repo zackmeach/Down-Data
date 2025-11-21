@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from datetime import date, datetime
 
 import polars as pl
 
 from typing import Any
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QComboBox,
@@ -30,6 +31,67 @@ from down_data.backend.player_service import PlayerService
 from down_data.ui.widgets import GridCell, GridLayoutManager, FilterPanel, RangeSelector, TablePanel
 
 from .base_page import SectionPage
+
+
+@dataclass(frozen=True)
+class Threshold:
+    """Numeric threshold paired with a comparison operator."""
+
+    value: float
+    operator: str
+
+
+@dataclass(frozen=True)
+class SearchCriteria:
+    """Normalized filter set for executing a player search."""
+
+    is_offense: bool
+    age_min: int
+    age_max: int
+    service_min: int
+    service_max: int
+    position_filter: str
+    team_filter: str
+    year_filter: str
+    draft_round_value: str
+    draft_position_value: str
+    draft_team_value: str
+    contract_years: Threshold | None
+    contract_value: Threshold | None
+    contract_guaranteed: Threshold | None
+    contract_apy: Threshold | None
+    contract_apy_cap_pct: Threshold | None
+    contract_year_signed: str
+    value_variant: str
+
+
+class SearchWorkerSignals(QObject):
+    """Signals emitted by the background search worker."""
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    finished = Signal(object)
+    error = Signal(str)
+
+
+class SearchWorker(QRunnable):
+    """Execute player filtering on a background thread."""
+
+    def __init__(self, service: PlayerService, criteria: SearchCriteria) -> None:
+        super().__init__()
+        self._service = service
+        self._criteria = criteria
+        self.signals = SearchWorkerSignals()
+
+    def run(self) -> None:  # pragma: no cover - background execution
+        try:
+            raw_players_df = self._service.get_all_players()
+            prepared = PlayerSearchPage._prepare_player_directory_frame(raw_players_df)
+            filtered = PlayerSearchPage._filter_players_by_criteria(prepared, self._criteria)
+            self.signals.finished.emit(filtered)
+        except Exception as exc:  # pragma: no cover - surfaced to UI
+            self.signals.error.emit(str(exc))
 
 
 class PlayerSearchPage(SectionPage):
@@ -58,6 +120,7 @@ class PlayerSearchPage(SectionPage):
         self._current_page = 0
         self._total_pages = 0
         self._current_results_df = None  # polars DataFrame storing filtered results
+        self._search_in_progress = False
         self._initialize_filter_options()
 
         # Filter control references per tab
@@ -89,6 +152,9 @@ class PlayerSearchPage(SectionPage):
             columns=12,
             rows=24
         )
+
+        self._thread_pool = QThreadPool.globalInstance()
+        self._active_worker: SearchWorker | None = None
         
         # Build the UI panels
         self._build_filter_panel()
@@ -201,7 +267,8 @@ class PlayerSearchPage(SectionPage):
         self._draft_position_options = ["Any"] + [str(i) for i in range(1, 33)] + ["N/A"]
         self._draft_team_options = self._team_options.copy()
 
-    def _prepare_player_directory_frame(self, frame: pl.DataFrame | None) -> pl.DataFrame:
+    @staticmethod
+    def _prepare_player_directory_frame(frame: pl.DataFrame | None) -> pl.DataFrame:
         """Return a normalised copy of the player directory with derived fields."""
         if frame is None:
             return pl.DataFrame()
@@ -819,12 +886,42 @@ class PlayerSearchPage(SectionPage):
         # Table starts empty - user must click SEARCH to populate
     
     def _perform_search(self) -> None:
-        """Execute search based on current filter criteria."""
-        # Determine if searching offense or defense
+        """Execute search based on current filter criteria on a worker thread."""
+        criteria = self._build_search_criteria()
+        if criteria is None:
+            return
+        if self._active_worker is not None:
+            print("[Search] A search is already running; ignoring new request")
+            return
+
+        self._current_results_df = None
+        self._total_pages = 0
+        self._current_page = 0
+        self._set_search_in_progress(True)
+        self._results_table.clear_data()
+        self._results_table.add_row(["Searching...", "", "", "", "", "", ""])
+        self._update_page_controls()
+
+        worker = SearchWorker(self._service, criteria)
+        worker.signals.finished.connect(self._on_search_finished)
+        worker.signals.error.connect(self._on_search_failed)
+        self._active_worker = worker
+
+        print(
+            "[Search] "
+            f"Age: {criteria.age_min}-{criteria.age_max}, Service: {criteria.service_min}-{criteria.service_max}, "
+            f"Offense: {criteria.is_offense}, Position: {criteria.position_filter}, Team: {criteria.team_filter}, "
+            f"Year: {criteria.year_filter}, Draft Round: {criteria.draft_round_value}, Draft Pick: {criteria.draft_position_value}, "
+            f"Draft Team: {criteria.draft_team_value}, Contract Variant: {criteria.value_variant}"
+        )
+
+        self._thread_pool.start(worker)
+
+    def _build_search_criteria(self) -> SearchCriteria | None:
+        """Collect the current filter selections into a structured criteria object."""
         is_offense = self._position_tabs.currentIndex() == 0
         tab_key = "offense" if is_offense else "defense"
 
-        # Get filter values for the active tab
         age_from_combo, age_to_combo = self._age_filters.get(tab_key, (None, None))
         service_from_combo, service_to_combo = self._service_filters.get(tab_key, (None, None))
         position_combo = self._position_filters.get(tab_key)
@@ -841,250 +938,278 @@ class PlayerSearchPage(SectionPage):
             or year_combo is None
         ):
             print("[Search] Filter controls not configured correctly")
-            return
+            return None
 
-        age_min = int(age_from_combo.currentText())
-        age_max = int(age_to_combo.currentText())
-        service_min = int(service_from_combo.currentText())
-        service_max = int(service_to_combo.currentText())
-        position_filter = position_combo.currentText()
-        team_filter = team_combo.currentText()
-        year_filter = year_combo.currentText()
-        draft_round_value = self._draft_round_filters[tab_key].currentText()
-        draft_position_value = self._draft_position_filters[tab_key].currentText()
-        draft_team_value = self._draft_team_filters[tab_key].currentText()
-        contract_years_filter = self._contract_years_filters.get(tab_key)
-        contract_value_filter = self._contract_value_filters.get(tab_key)
-        contract_guaranteed_filter = self._contract_guaranteed_filters.get(tab_key)
-        contract_apy_filter = self._contract_apy_filters.get(tab_key)
-        contract_apy_cap_pct_filter = self._contract_apy_cap_pct_filters.get(tab_key)
+        def _to_int(text: str) -> int:
+            try:
+                return int(text)
+            except ValueError:
+                return 0
+
+        age_min = _to_int(age_from_combo.currentText())
+        age_max = _to_int(age_to_combo.currentText())
+        service_min = _to_int(service_from_combo.currentText())
+        service_max = _to_int(service_to_combo.currentText())
+
+        def _extract_threshold(mapping: dict[str, tuple[QAbstractSpinBox, QComboBox]], key: str) -> Threshold | None:
+            widgets = mapping.get(key)
+            if widgets is None:
+                return None
+            spin_widget, operator_combo = widgets
+            operator = operator_combo.currentText()
+            if operator == "Any":
+                return None
+            return Threshold(float(spin_widget.value()), operator)
+
+        contract_years_threshold = _extract_threshold(self._contract_years_filters, tab_key)
+        contract_value_threshold = _extract_threshold(self._contract_value_filters, tab_key)
+        contract_guaranteed_threshold = _extract_threshold(self._contract_guaranteed_filters, tab_key)
+        contract_apy_threshold = _extract_threshold(self._contract_apy_filters, tab_key)
+        contract_apy_cap_pct_threshold = _extract_threshold(self._contract_apy_cap_pct_filters, tab_key)
+
         contract_year_signed_combo = self._contract_year_signed_filters.get(tab_key)
-        value_variant = self._get_value_variant()
-        
-        print(
-            "[Search] "
-            f"Age: {age_min}-{age_max}, Service: {service_min}-{service_max}, "
-            f"Offense: {is_offense}, Position: {position_filter}, Team: {team_filter}, Year: {year_filter}, "
-            f"Draft Round: {draft_round_value}, Draft Pick: {draft_position_value}, Draft Team: {draft_team_value}, "
-            f"Contract Variant: {value_variant}"
+        contract_year_signed_value = contract_year_signed_combo.currentText() if contract_year_signed_combo else "Any"
+
+        return SearchCriteria(
+            is_offense=is_offense,
+            age_min=age_min,
+            age_max=age_max,
+            service_min=service_min,
+            service_max=service_max,
+            position_filter=position_combo.currentText(),
+            team_filter=team_combo.currentText(),
+            year_filter=year_combo.currentText(),
+            draft_round_value=self._draft_round_filters[tab_key].currentText(),
+            draft_position_value=self._draft_position_filters[tab_key].currentText(),
+            draft_team_value=self._draft_team_filters[tab_key].currentText(),
+            contract_years=contract_years_threshold,
+            contract_value=contract_value_threshold,
+            contract_guaranteed=contract_guaranteed_threshold,
+            contract_apy=contract_apy_threshold,
+            contract_apy_cap_pct=contract_apy_cap_pct_threshold,
+            contract_year_signed=contract_year_signed_value,
+            value_variant=self._get_value_variant(),
         )
-        
-        try:
-            # Get all players from service and enrich with derived fields
-            raw_players_df = self._service.get_all_players()
-            players_df = self._prepare_player_directory_frame(raw_players_df)
-            
-            if players_df.height == 0:
-                self._results_table.clear_data()
-                return
-            
-            # Filter by position group (offense vs defense)
-            if is_offense:
-                # Offense positions: QB, RB, WR, TE, FB, OL positions
-                offense_positions = ['QB', 'RB', 'WR', 'TE', 'FB', 'HB', 'T', 'G', 'C', 'OT', 'OG']
-                players_df = players_df.filter(
-                    players_df['position'].is_in(offense_positions)
+
+    def _on_search_finished(self, results_df: pl.DataFrame) -> None:
+        """Handle completion of a background search."""
+        self._active_worker = None
+        self._current_results_df = results_df
+
+        total_rows = results_df.height if isinstance(results_df, pl.DataFrame) else 0
+        self._total_pages = math.ceil(total_rows / self._page_size) if total_rows > 0 else 0
+        self._current_page = 1 if self._total_pages > 0 else 0
+
+        print(f"[Search] Found {total_rows} players across {self._total_pages} pages")
+
+        if self._total_pages == 0:
+            self._results_table.clear_data()
+
+        self._load_current_page()
+        self._set_search_in_progress(False)
+
+    def _on_search_failed(self, message: str) -> None:
+        """Display errors raised during background search execution."""
+        self._active_worker = None
+        self._current_results_df = None
+        self._total_pages = 0
+        self._current_page = 0
+        print(f"[Search] Error: {message}")
+
+        self._results_table.clear_data()
+        self._results_table.add_row(["Error loading players", message, "", "", "", "", ""])
+        self._update_page_controls()
+        self._set_search_in_progress(False)
+
+    def _set_search_in_progress(self, in_progress: bool) -> None:
+        """Toggle UI affordances while a search is running."""
+        self._search_in_progress = in_progress
+        self._search_button.setEnabled(not in_progress)
+        if in_progress:
+            self._prev_page_button.setEnabled(False)
+            self._next_page_button.setEnabled(False)
+        else:
+            self._update_page_controls()
+
+    @staticmethod
+    def _filter_players_by_criteria(
+        players_df: pl.DataFrame, criteria: SearchCriteria
+    ) -> pl.DataFrame:
+        """Apply UI search filters to the player directory frame."""
+        if players_df is None:
+            return pl.DataFrame()
+        if players_df.height == 0:
+            return players_df
+
+        df = players_df
+
+        if "position" in df.columns:
+            offense_positions = ['QB', 'RB', 'WR', 'TE', 'FB', 'HB', 'T', 'G', 'C', 'OT', 'OG']
+            defense_positions = ['DE', 'DT', 'NT', 'LB', 'ILB', 'OLB', 'MLB', 'CB', 'S', 'SS', 'FS', 'DB']
+            df = df.filter(
+                df['position'].is_in(offense_positions if criteria.is_offense else defense_positions)
+            )
+
+        if "age" in df.columns:
+            df = df.filter(
+                pl.col("age").cast(pl.Float64, strict=False).is_between(
+                    criteria.age_min, criteria.age_max, closed="both"
                 )
-            else:
-                # Defense positions: DL, LB, DB positions
-                defense_positions = ['DE', 'DT', 'NT', 'LB', 'ILB', 'OLB', 'MLB', 'CB', 'S', 'SS', 'FS', 'DB']
-                players_df = players_df.filter(
-                    players_df['position'].is_in(defense_positions)
-                )
-            
-            # Filter by age if column available
-            if "age" in players_df.columns:
-                players_df = players_df.filter(
-                    pl.col("age").cast(pl.Float64, strict=False).is_between(age_min, age_max, closed="both")
-                )
-            
-            # Filter by service time if applicable column exists
-            for service_column in ["years_pro", "experience", "seasons", "seasons_played"]:
-                if service_column in players_df.columns:
-                    players_df = players_df.filter(
-                        pl.col(service_column).cast(pl.Float64, strict=False).is_between(
-                            service_min, service_max, closed="both"
-                        )
+            )
+
+        for service_column in ["years_pro", "experience", "seasons", "seasons_played"]:
+            if service_column in df.columns:
+                df = df.filter(
+                    pl.col(service_column).cast(pl.Float64, strict=False).is_between(
+                        criteria.service_min, criteria.service_max, closed="both"
                     )
-                    break
-
-            # Filter by specific player position if not Any
-            if position_filter != "Any" and "position" in players_df.columns:
-                players_df = players_df.filter(
-                    pl.col("position").str.to_uppercase() == position_filter.upper()
                 )
+                break
 
-            # Filter by team if not Any
-            if team_filter != "Any":
-                team_conditions: list[pl.Expr] = []
-                for column in ["team_abbr", "current_team_abbr", "recent_team", "team"]:
-                    if column in players_df.columns:
-                        team_conditions.append(
-                            pl.col(column).str.to_uppercase() == team_filter.upper()
+        if criteria.position_filter != "Any" and "position" in df.columns:
+            df = df.filter(
+                pl.col("position").str.to_uppercase() == criteria.position_filter.upper()
+            )
+
+        if criteria.team_filter != "Any":
+            team_conditions: list[pl.Expr] = []
+            for column in ["team_abbr", "current_team_abbr", "recent_team", "team"]:
+                if column in df.columns:
+                    team_conditions.append(
+                        pl.col(column).str.to_uppercase() == criteria.team_filter.upper()
+                    )
+            if team_conditions:
+                condition = team_conditions[0]
+                for expr in team_conditions[1:]:
+                    condition = condition | expr
+                df = df.filter(condition)
+
+        if criteria.year_filter != "Any":
+            try:
+                start_year = int(criteria.year_filter.split("-")[0])
+                for column in ["last_season", "season", "year"]:
+                    if column in df.columns:
+                        df = df.filter(
+                            pl.col(column).cast(pl.Int64, strict=False) >= start_year
                         )
-                if team_conditions:
-                    condition = team_conditions[0]
-                    for expr in team_conditions[1:]:
+                        break
+            except ValueError:
+                pass
+
+        def apply_threshold(
+            current_df: pl.DataFrame,
+            threshold: Threshold | None,
+            column_name: str,
+            *,
+            cast_type: pl.DataType = pl.Float64,
+        ) -> pl.DataFrame:
+            if threshold is None or column_name not in current_df.columns:
+                return current_df
+            expr = pl.col(column_name).cast(cast_type, strict=False)
+            if threshold.operator == "<":
+                return current_df.filter(expr <= threshold.value)
+            return current_df.filter(expr >= threshold.value)
+
+        df = apply_threshold(df, criteria.contract_years, "years")
+
+        if criteria.contract_year_signed != "Any" and "year_signed" in df.columns:
+            try:
+                contract_year_int = int(criteria.contract_year_signed)
+                df = df.filter(
+                    pl.col("year_signed").cast(pl.Int64, strict=False) == contract_year_int
+                )
+            except ValueError:
+                pass
+
+        value_column = (
+            "inflated_value"
+            if criteria.value_variant == "inflated" and "inflated_value" in df.columns
+            else "value"
+        )
+        df = apply_threshold(df, criteria.contract_value, value_column)
+
+        guaranteed_column = (
+            "inflated_guaranteed"
+            if criteria.value_variant == "inflated" and "inflated_guaranteed" in df.columns
+            else "guaranteed"
+        )
+        df = apply_threshold(df, criteria.contract_guaranteed, guaranteed_column)
+
+        apy_column = (
+            "inflated_apy"
+            if criteria.value_variant == "inflated" and "inflated_apy" in df.columns
+            else "apy"
+        )
+        df = apply_threshold(df, criteria.contract_apy, apy_column)
+
+        df = apply_threshold(df, criteria.contract_apy_cap_pct, "apy_cap_pct")
+
+        draft_round_int: int | None = None
+        if criteria.draft_round_value != "Any":
+            if criteria.draft_round_value == "Undrafted":
+                conditions: list[pl.Expr] = []
+                if "draft_round" in df.columns:
+                    conditions.append(pl.col("draft_round").is_null() | (pl.col("draft_round") == 0))
+                if "draft_pick" in df.columns:
+                    conditions.append(pl.col("draft_pick").is_null() | (pl.col("draft_pick") == 0))
+                if conditions:
+                    condition = conditions[0]
+                    for expr in conditions[1:]:
                         condition = condition | expr
-                    players_df = players_df.filter(condition)
-
-            # Filter by year if not Any (use last_season/year columns when available)
-            if year_filter != "Any":
+                    df = df.filter(condition)
+            else:
                 try:
-                    start_year = int(year_filter.split("-")[0])
-                    for column in ["last_season", "season", "year"]:
-                        if column in players_df.columns:
-                            players_df = players_df.filter(
-                                pl.col(column).cast(pl.Int64, strict=False) >= start_year
-                            )
-                            break
+                    draft_round_int = int(criteria.draft_round_value)
                 except ValueError:
-                    pass
-
-            def apply_threshold(
-                df: pl.DataFrame,
-                widgets: tuple[QAbstractSpinBox, QComboBox] | None,
-                column_name: str,
-                *,
-                cast_type: pl.DataType = pl.Float64,
-            ) -> pl.DataFrame:
-                if widgets is None or column_name not in df.columns:
-                    return df
-                spin_widget, operator_combo = widgets
-                operator = operator_combo.currentText()
-                if operator == "Any":
-                    return df
-                value = float(spin_widget.value())
-                expr = pl.col(column_name).cast(cast_type, strict=False)
-                if operator == "<":
-                    return df.filter(expr <= value)
-                return df.filter(expr >= value)
-
-            players_df = apply_threshold(players_df, contract_years_filter, "years")
-
-            # Contract year signed
-            if contract_year_signed_combo is not None and "year_signed" in players_df.columns:
-                contract_year_signed_value = contract_year_signed_combo.currentText()
-                if contract_year_signed_value != "Any":
-                    try:
-                        contract_year_int = int(contract_year_signed_value)
-                        players_df = players_df.filter(
-                            pl.col("year_signed").cast(pl.Int64, strict=False) == contract_year_int
+                    draft_round_int = None
+                if draft_round_int is not None:
+                    if "draft_round" in df.columns:
+                        df = df.filter(
+                            pl.col("draft_round").cast(pl.Int64, strict=False) == draft_round_int
                         )
-                    except ValueError:
-                        pass
+                    elif "draft_pick" in df.columns:
+                        df = df.filter(
+                            (((pl.col("draft_pick").cast(pl.Int64, strict=False) - 1) // 32) + 1)
+                            == draft_round_int
+                        )
 
-            value_column = (
-                "inflated_value"
-                if value_variant == "inflated" and "inflated_value" in players_df.columns
-                else "value"
-            )
-            players_df = apply_threshold(players_df, contract_value_filter, value_column)
-
-            guaranteed_column = (
-                "inflated_guaranteed"
-                if value_variant == "inflated" and "inflated_guaranteed" in players_df.columns
-                else "guaranteed"
-            )
-            players_df = apply_threshold(players_df, contract_guaranteed_filter, guaranteed_column)
-
-            apy_column = (
-                "inflated_apy"
-                if value_variant == "inflated" and "inflated_apy" in players_df.columns
-                else "apy"
-            )
-            players_df = apply_threshold(players_df, contract_apy_filter, apy_column)
-
-            players_df = apply_threshold(players_df, contract_apy_cap_pct_filter, "apy_cap_pct")
-
-            # Filter by draft round
-            draft_round_int: int | None = None
-            if draft_round_value != "Any":
-                if draft_round_value == "Undrafted":
-                    conditions: list[pl.Expr] = []
-                    if "draft_round" in players_df.columns:
-                        conditions.append(pl.col("draft_round").is_null() | (pl.col("draft_round") == 0))
-                    if "draft_pick" in players_df.columns:
-                        conditions.append(pl.col("draft_pick").is_null() | (pl.col("draft_pick") == 0))
-                    if conditions:
-                        condition = conditions[0]
-                        for expr in conditions[1:]:
-                            condition = condition | expr
-                        players_df = players_df.filter(condition)
-                else:
+        if criteria.draft_position_value not in ("Any", "N/A"):
+            try:
+                draft_pick_in_round = int(criteria.draft_position_value)
+            except ValueError:
+                draft_pick_in_round = None
+            if draft_pick_in_round is not None and "draft_pick" in df.columns:
+                if draft_round_int is None and criteria.draft_round_value not in ("Any", "Undrafted"):
                     try:
-                        draft_round_int = int(draft_round_value)
+                        draft_round_int = int(criteria.draft_round_value)
                     except ValueError:
                         draft_round_int = None
-                    if draft_round_int is not None:
-                        if "draft_round" in players_df.columns:
-                            players_df = players_df.filter(
-                                pl.col("draft_round").cast(pl.Int64, strict=False) == draft_round_int
-                            )
-                        elif "draft_pick" in players_df.columns:
-                            players_df = players_df.filter(
-                                (((pl.col("draft_pick").cast(pl.Int64, strict=False) - 1) // 32) + 1)
-                                == draft_round_int
-                            )
+                if draft_round_int is not None:
+                    df = df.filter(
+                        (((pl.col("draft_pick").cast(pl.Int64, strict=False) - 1) % 32) + 1)
+                        == draft_pick_in_round
+                    )
 
-            # Filter by draft pick within round
-            if draft_position_value not in ("Any", "N/A"):
-                try:
-                    draft_pick_in_round = int(draft_position_value)
-                except ValueError:
-                    draft_pick_in_round = None
-                if draft_pick_in_round is not None and "draft_pick" in players_df.columns:
-                    if draft_round_int is None and draft_round_value not in ("Any", "Undrafted"):
-                        try:
-                            draft_round_int = int(draft_round_value)
-                        except ValueError:
-                            draft_round_int = None
-                    if draft_round_int is not None:
-                        players_df = players_df.filter(
-                            (((pl.col("draft_pick").cast(pl.Int64, strict=False) - 1) % 32) + 1)
-                            == draft_pick_in_round
-                        )
-
-            # Filter by draft team
-            if draft_team_value != "Any":
-                draft_team_conditions: list[pl.Expr] = []
-                for column in ["draft_team", "draft_team_abbr", "draft_team_code"]:
-                    if column in players_df.columns:
+        if criteria.draft_team_value != "Any":
+            draft_team_conditions: list[pl.Expr] = []
+            for column in ["draft_team", "draft_team_abbr", "draft_team_code"]:
+                if column in df.columns:
+                    draft_team_conditions.append(
+                        pl.col(column).str.to_uppercase() == criteria.draft_team_value.upper()
+                    )
+            if not draft_team_conditions:
+                for column in ["team_abbr", "current_team_abbr", "recent_team", "team"]:
+                    if column in df.columns:
                         draft_team_conditions.append(
-                            pl.col(column).str.to_uppercase() == draft_team_value.upper()
+                            pl.col(column).str.to_uppercase() == criteria.draft_team_value.upper()
                         )
-                if not draft_team_conditions:
-                    for column in ["team_abbr", "current_team_abbr", "recent_team", "team"]:
-                        if column in players_df.columns:
-                            draft_team_conditions.append(
-                                pl.col(column).str.to_uppercase() == draft_team_value.upper()
-                            )
-                if draft_team_conditions:
-                    condition = draft_team_conditions[0]
-                    for expr in draft_team_conditions[1:]:
-                        condition = condition | expr
-                    players_df = players_df.filter(condition)
-            
-            # Store filtered results for pagination
-            self._current_results_df = players_df
-            total_rows = players_df.height
-            self._total_pages = math.ceil(total_rows / self._page_size) if total_rows > 0 else 0
-            self._current_page = 1 if self._total_pages > 0 else 0
+            if draft_team_conditions:
+                condition = draft_team_conditions[0]
+                for expr in draft_team_conditions[1:]:
+                    condition = condition | expr
+                df = df.filter(condition)
 
-            print(f"[Search] Found {total_rows} players across {self._total_pages} pages")
-
-            # Load first page
-            self._load_current_page()
-            
-        except Exception as e:
-            print(f"[Search] Error: {e}")
-            # Show error in results table
-            self._results_table.clear_data()
-            self._results_table.add_row(["Error loading players", str(e), "", "", "", "", ""])
-            self._total_pages = 0
-            self._current_page = 0
-            self._update_page_controls()
-        self._load_current_page()
+        return df
 
     def _load_current_page(self) -> None:
         """Load the rows for the current page into the results table."""
@@ -1173,8 +1298,12 @@ class PlayerSearchPage(SectionPage):
         else:
             self._page_display.setText("Page 0/0")
 
-        self._prev_page_button.setEnabled(self._current_page > 1)
-        self._next_page_button.setEnabled(self._current_page < self._total_pages)
+        if self._search_in_progress:
+            self._prev_page_button.setEnabled(False)
+            self._next_page_button.setEnabled(False)
+        else:
+            self._prev_page_button.setEnabled(self._current_page > 1)
+            self._next_page_button.setEnabled(self._current_page < self._total_pages)
 
     def _go_to_next_page(self) -> None:
         """Navigate to the next page of results."""
