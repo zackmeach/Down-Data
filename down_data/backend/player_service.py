@@ -14,12 +14,14 @@ import polars as pl
 
 from down_data.core import Player, PlayerProfile, PlayerQuery, PlayerNotFoundError
 from down_data.core.ratings import RatingBreakdown
+from .offense_stats_repository import BasicOffenseStatsRepository
 
 try:  # pragma: no cover - defensive import
-    from nflreadpy import load_players, load_player_stats
+    from nflreadpy import load_players, load_player_stats, load_schedules
 except ImportError:  # pragma: no cover - imported dynamically in some environments
     load_players = None  # type: ignore
     load_player_stats = None  # type: ignore
+    load_schedules = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -271,9 +273,12 @@ class PlayerService:
 
     def __init__(self, directory: PlayerDirectory | None = None) -> None:
         self.directory = directory or PlayerDirectory()
-        self._stats_cache: dict[tuple[str, str, str], pl.DataFrame] = {}
+        self._stats_cache: dict[tuple[str, str, str, str], pl.DataFrame] = {}
         self._rating_baselines: dict[str, dict[str, tuple[float, float]]] = {}
         self._rating_seasons = self._compute_rating_seasons()
+        self._schedule_cache: dict[int, pl.DataFrame] = {}
+        self._team_record_cache: dict[tuple[str, int, str], tuple[int, int, int]] = {}
+        self._offense_stats_repository = BasicOffenseStatsRepository()
 
     def get_all_players(self) -> pl.DataFrame:
         """Get the full player directory as a DataFrame for filtering."""
@@ -322,7 +327,8 @@ class PlayerService:
         player: Player,
         seasons: Iterable[int] | bool | None,
         season_type: str | None,
-    ) -> tuple[str, str, str]:
+        summary_level: str | None,
+    ) -> tuple[str, str, str, str]:
         identifier = player.profile.gsis_id or player.profile.full_name
         if isinstance(seasons, bool) or seasons is None:
             seasons_repr = str(seasons)
@@ -333,8 +339,9 @@ class PlayerService:
                 seasons_repr = str(seasons)
         else:
             seasons_repr = str(seasons)
-        season_type_repr = (season_type or "REG").upper()
-        return (identifier, seasons_repr, season_type_repr)
+        season_type_repr = (season_type or "ALL").upper()
+        summary_level_repr = (summary_level or "WEEK").lower()
+        return (identifier, seasons_repr, season_type_repr, summary_level_repr)
 
     def get_player_stats(
         self,
@@ -342,14 +349,19 @@ class PlayerService:
         *,
         seasons: Iterable[int] | bool | None = True,
         season_type: str | None = "REG",
+        summary_level: str | None = "week",
     ) -> pl.DataFrame:
         """Fetch player stats with an internal cache."""
 
-        key = self._stats_cache_key(player, seasons, season_type)
+        key = self._stats_cache_key(player, seasons, season_type, summary_level)
         if key in self._stats_cache:
             return self._stats_cache[key].clone()
 
-        stats = player.fetch_stats(seasons=seasons, season_type=season_type)
+        stats = player.fetch_stats(
+            seasons=seasons,
+            season_type=season_type,
+            summary_level=summary_level,
+        )
         if stats is None:
             stats = pl.DataFrame()
         self._stats_cache[key] = stats.clone()
@@ -361,6 +373,7 @@ class PlayerService:
         *,
         seasons: Iterable[int] | None = None,
         season_type: str | None = None,
+        summary_level: str | None = None,
     ) -> pl.DataFrame:
         player = self.load_player(query)
         kwargs: dict[str, object] = {}
@@ -368,7 +381,135 @@ class PlayerService:
             kwargs["seasons"] = seasons
         if season_type is not None:
             kwargs["season_type"] = season_type
+        if summary_level is not None:
+            kwargs["summary_level"] = summary_level
         return self.get_player_stats(player, **kwargs)
+
+    def get_basic_offense_stats(
+        self,
+        *,
+        player_id: str | None = None,
+        player_ids: Iterable[str] | None = None,
+        seasons: Iterable[int] | None = None,
+        team: str | None = None,
+        position: str | None = None,
+        refresh_cache: bool = False,
+    ) -> pl.DataFrame:
+        """Return cached basic offense stats, optionally refreshing the cache."""
+
+        try:
+            identifiers: list[str] | None = None
+            if player_id or player_ids:
+                ids: list[str] = []
+                if player_id:
+                    ids.append(str(player_id))
+                if player_ids:
+                    ids.extend(str(pid) for pid in player_ids)
+                identifiers = ids
+
+            return self._offense_stats_repository.query(
+                player_ids=identifiers,
+                seasons=seasons,
+                team=team,
+                position=position,
+                refresh=refresh_cache,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to load basic offense cache (refresh=%s): %s",
+                refresh_cache,
+                exc,
+            )
+            return pl.DataFrame()
+
+    def _load_schedule(self, season: int) -> pl.DataFrame:
+        """Fetch and cache the league schedule for the given season."""
+
+        if season in self._schedule_cache:
+            return self._schedule_cache[season]
+
+        if load_schedules is None:
+            schedule = pl.DataFrame()
+        else:
+            try:
+                schedule = load_schedules(seasons=[season])
+            except Exception as exc:  # pragma: no cover - runtime fetch can fail
+                logger.debug("Failed to load schedule for %s: %s", season, exc)
+                schedule = pl.DataFrame()
+
+        if not isinstance(schedule, pl.DataFrame):
+            schedule = pl.DataFrame(schedule)  # type: ignore[arg-type]
+
+        self._schedule_cache[season] = schedule
+        return schedule
+
+    def get_team_record(
+        self,
+        team: str | None,
+        season: int,
+        *,
+        season_type: str = "REG",
+    ) -> tuple[int, int, int]:
+        """Return (wins, losses, ties) for a team in the specified season."""
+
+        if not team:
+            return (0, 0, 0)
+
+        team_key = team.strip().upper()
+        if not team_key:
+            return (0, 0, 0)
+
+        cache_key = (team_key, season, season_type.upper())
+        if cache_key in self._team_record_cache:
+            return self._team_record_cache[cache_key]
+
+        schedule = self._load_schedule(season)
+        if schedule.is_empty():
+            self._team_record_cache[cache_key] = (0, 0, 0)
+            return (0, 0, 0)
+
+        filtered = schedule.filter(
+            (pl.col("season") == season)
+            & (pl.col("game_type").str.to_uppercase() == season_type.upper())
+            & (
+                (pl.col("home_team").str.to_uppercase() == team_key)
+                | (pl.col("away_team").str.to_uppercase() == team_key)
+            )
+        )
+
+        wins = losses = ties = 0
+        for row in filtered.iter_rows(named=True):
+            home_team = str(row.get("home_team") or "").upper()
+            away_team = str(row.get("away_team") or "").upper()
+            home_score = row.get("home_score")
+            away_score = row.get("away_score")
+
+            if home_score is None or away_score is None:
+                continue
+
+            try:
+                home_score = int(home_score)
+                away_score = int(away_score)
+            except (TypeError, ValueError):
+                continue
+
+            if home_team == team_key:
+                if home_score > away_score:
+                    wins += 1
+                elif home_score < away_score:
+                    losses += 1
+                else:
+                    ties += 1
+            elif away_team == team_key:
+                if away_score > home_score:
+                    wins += 1
+                elif away_score < home_score:
+                    losses += 1
+                else:
+                    ties += 1
+
+        self._team_record_cache[cache_key] = (wins, losses, ties)
+        return (wins, losses, ties)
 
     # --------------------------------------------------------------------- #
     # Rating helpers
@@ -487,12 +628,16 @@ class PlayerService:
         if stats.is_empty():
             return self._default_baseline(metrics)
 
-        stats = stats.with_columns(
-            pl.coalesce([pl.col("player_position"), pl.col("position")])
-            .fill_null("")
-            .str.to_uppercase()
-            .alias("_pos"),
-        )
+        position_exprs = [pl.col(column) for column in ("player_position", "position") if column in stats.columns]
+        if position_exprs:
+            stats = stats.with_columns(
+                pl.coalesce(position_exprs)
+                .fill_null("")
+                .str.to_uppercase()
+                .alias("_pos"),
+            )
+        else:
+            stats = stats.with_columns(pl.lit("").alias("_pos"))
         stats = stats.filter(pl.col("_pos").is_in(list(positions)))
         if stats.height == 0:
             return self._default_baseline(metrics)

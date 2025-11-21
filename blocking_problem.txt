@@ -1,0 +1,62 @@
+Blocking-Stat Data Gap
+======================
+
+Overview
+--------
+We are building a local, desktop “data explorer” that visualises NFL player information.
+The stack is Python + PySide6 for the UI, `nflreadpy` + Polars for data access, and a
+collection of locally-cached Parquet files for speed.  The app already shows rich
+offensive and defensive season summaries (passing yards, rushing yards, sacks taken,
+interceptions, etc.) for every player since 1999, using the nflverse data pipelines
+(`load_player_stats`, play-by-play, Next Gen Stats, etc.).
+
+However, we cannot surface blocking metrics (pass-block grades, run-block success,
+pressures or sacks allowed by an offensive lineman, etc.) because the data feeds we rely
+on do not expose those fields:
+
+1. nflverse weekly/season stats – provide standard counting stats only (pass/rush/receive
+   columns plus basic defensive data).  No “pressures allowed”, “pass-block win rate”,
+   “run-block grade”, or similar columns exist.
+2. nflfastR play-by-play (available through `nflreadpy.load_pbp`) – records the ball
+   carrier, targeted receiver, tackler(s) and penalty flags.  Offensive linemen are not
+   identified on individual plays except in rare penalty situations (e.g., holding).
+   There is no attribution of a sack or pressure to a specific blocker.
+3. Next Gen Stats (nflverse `load_nextgen_stats`) – includes tracking-based metrics for
+   quarterbacks, receivers and rushers (speed, separation, time-to-throw).  It does not
+   publish player-level blocking metrics.
+
+Because of those gaps, even attempting to “infer” blocking results is unreliable:
+
+* Sacks are logged with the defender responsible, but the data does not capture which
+  offensive lineman was beaten on the play.
+* Pressures, hurries and run-block outcomes are not represented at all in the public
+  datasets, so there is nothing to aggregate or approximate.
+* Offensive line substitutions and positions (LT, LG, C, etc.) are not enumerated per
+  play, so even heuristic approaches (e.g., “assume the left tackle gave up the sack if
+  the defender lined up at LOLB”) would be blind guesses.
+
+The industry solutions that *do* track blocking are proprietary:
+
+* **PFF (Pro Football Focus)** – manual charting with pressures allowed, pass-block and
+  run-block grades.  Access requires a commercial licence.
+* **Sports Info Solutions / TruMedia** – similar charting datasets for the trenches,
+  also licensed products.
+* **Tempus Ex / Infinite Athlete (Next Gen raw tracking)** – can be used to build
+  blocking models, but requires enterprise agreements and substantial processing.
+
+Therefore, with our current data sources we cannot honestly present blocker stats or
+grade our offensive linemen.  Any UI components that suggest we can display pressures
+allowed, pass-block win rate, or run-block effectiveness would be misleading unless we
+onboard an additional, licensed provider.
+
+Summary
+-------
+* The nflverse data stack (weekly stats, play-by-play, Next Gen) exposes no blocker-
+  specific metrics.
+* Sack attribution to individual offensive linemen is not available, so inference is not
+  reliable.
+* To get true blocking data we would need to licence charting/tracking products such as
+  PFF, SIS, or Tempus Ex.
+* Until we add one of those providers, the app should clearly communicate that blocking
+  statistics are unavailable rather than displaying placeholder or fabricated values.
+

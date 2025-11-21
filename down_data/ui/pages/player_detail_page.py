@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QSizePolicy,
+    QHeaderView,
 )
 
 from down_data.backend.player_service import PlayerService
@@ -185,6 +186,16 @@ class PlayerDetailSectionScaffold(QWidget):
         if not columns:
             columns = ["Season", "Team", "Primary Pos", "Games", "Snaps"]
         self._table_panel.set_columns(columns)
+        self._configure_stats_table_header(len(columns))
+
+    def _configure_stats_table_header(self, column_count: int) -> None:
+        if self._table_panel is None or column_count <= 0:
+            return
+        header = self._table_panel.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        for index in range(column_count):
+            mode = QHeaderView.ResizeToContents if index == column_count - 1 else QHeaderView.Stretch
+            header.setSectionResizeMode(index, mode)
 
     def update_personal_details(self, details: list[tuple[str, str]]) -> None:
         if self._personal_details_widget is not None:
@@ -220,6 +231,7 @@ class PlayerDetailPage(SectionPage):
         self._season_rows: list[list[str]] = []
         self._table_columns: list[str] = ["Season", "Team", "Primary Pos", "Games", "Snaps"]
         self._is_defensive: bool = False
+        self._is_quarterback: bool = False
         self._current_player: Player | None = None
         self._basic_ratings: list[RatingBreakdown] = []
 
@@ -516,9 +528,36 @@ class PlayerDetailPage(SectionPage):
             query = PlayerQuery(name=full_name, team=team or None, position=position or None)
             player = self._service.load_player(query)
             self._current_player = player
-            # Update table columns based on player side of ball
+            position_value = (player.profile.position or player.profile.position_group or "").upper()
+            self._is_quarterback = position_value == "QB"
             self._is_defensive = bool(getattr(player, "is_defensive")() if hasattr(player, "is_defensive") else False)
-            if self._is_defensive:
+            if self._is_quarterback:
+                self._table_columns = [
+                    "Season",
+                    "Age",
+                    "Team",
+                    "Team Record",
+                    "Games Played",
+                    "Snaps Played",
+                    "QB Rating",
+                    "Total Touchdowns",
+                    "Total Turnovers",
+                    "Total Yards",
+                    "Completions",
+                    "Attempts",
+                    "Completion Percentage",
+                    "Yards",
+                    "Touchdowns",
+                    "Touchdown %",
+                    "Interceptions",
+                    "Interceptions %",
+                    "Yards/Attempt",
+                    "Yards/Completion",
+                    "Sacks Taken",
+                    "Sack %",
+                    "Sack Yards",
+                ]
+            elif self._is_defensive:
                 self._table_columns = [
                     "Season",
                     "Team",
@@ -542,6 +581,23 @@ class PlayerDetailPage(SectionPage):
                     "Rec Yds",
                     "Total TD",
                 ]
+
+            cached_stats = pl.DataFrame()
+            player_id = player.profile.gsis_id
+            if player_id:
+                cached_stats = self._service.get_basic_offense_stats(player_id=player_id)
+
+            if cached_stats.height > 0:
+                self._season_rows, summary = self._build_table_rows_from_cached(player, cached_stats)
+                self._basic_ratings = self._service.get_basic_ratings(
+                    player,
+                    summary=summary,
+                    is_defensive=self._is_defensive,
+                )
+                self._update_table_views()
+                self._update_basic_ratings_views()
+                return
+
             stats = self._service.get_player_stats(player, seasons=True)
         except (PlayerNotFoundError, SeasonNotAvailableError) as exc:
             logger.debug("No stats available for %s: %s", full_name, exc)
@@ -555,7 +611,7 @@ class PlayerDetailPage(SectionPage):
             return
 
         try:
-            self._season_rows, summary = self._build_table_rows(stats)
+            self._season_rows, summary = self._build_table_rows(player, stats)
             self._basic_ratings = self._service.get_basic_ratings(
                 player,
                 summary=summary,
@@ -569,7 +625,7 @@ class PlayerDetailPage(SectionPage):
         self._update_table_views()
         self._update_basic_ratings_views()
 
-    def _build_table_rows(self, stats: pl.DataFrame) -> tuple[list[list[str]], dict[str, float]]:
+    def _build_table_rows(self, player: Player, stats: pl.DataFrame) -> tuple[list[list[str]], dict[str, float]]:
         """Transform raw stats into table-ready rows and summary metrics."""
 
         if stats is None or stats.height == 0:
@@ -582,6 +638,18 @@ class PlayerDetailPage(SectionPage):
 
         if data.height == 0 or "season" not in data.columns:
             return [], {}
+
+        if self._is_quarterback:
+            return self._build_qb_table_rows(player, data, stats)
+
+        return self._build_standard_table_rows(data, stats)
+
+    def _build_standard_table_rows(
+        self,
+        data: pl.DataFrame,
+        original_stats: pl.DataFrame,
+    ) -> tuple[list[list[str]], dict[str, float]]:
+        """Construct season rows for non-quarterbacks using legacy layout."""
 
         team_expr = (
             self._coalesce_expr(
@@ -655,7 +723,6 @@ class PlayerDetailPage(SectionPage):
             ]
         )
 
-        # Build additional numeric metrics with safe defaults
         def _num(col: str) -> pl.Expr:
             return (
                 pl.col(col).cast(pl.Float64, strict=False).fill_null(0)
@@ -738,10 +805,10 @@ class PlayerDetailPage(SectionPage):
         for row in aggregated.iter_rows(named=True):
             team_value = row.get("_team") or ""
             if not team_value:
-                team_value = self._infer_team_for_row(row, stats)
+                team_value = self._infer_team_for_row(row, original_stats)
             position_value = row.get("_position") or ""
             if not position_value:
-                position_value = self._infer_position_for_row(row, stats)
+                position_value = self._infer_position_for_row(row, original_stats)
             base = [
                 self._format_value(row.get("season")),
                 self._format_value(team_value),
@@ -765,6 +832,7 @@ class PlayerDetailPage(SectionPage):
                     self._format_int(row.get("_total_td")),
                 ]
             rows.append(base + extra)
+
         if self._is_defensive:
             summary = {
                 "def_tackles_total": float((aggregated["_def_solo"].sum() or 0) + (aggregated["_def_ast"].sum() or 0)),
@@ -784,6 +852,392 @@ class PlayerDetailPage(SectionPage):
                 "snaps": float(aggregated["_snaps"].sum() or 0),
             }
         return rows, summary
+
+    def _build_table_rows_from_cached(
+        self,
+        player: Player,
+        cached_stats: pl.DataFrame,
+    ) -> tuple[list[list[str]], dict[str, float]]:
+        """Construct quarterback rows from the cached basic offense stats."""
+
+        if cached_stats.is_empty():
+            return [], {}
+
+        data = cached_stats.sort("season", descending=True)
+        rows: list[list[str]] = []
+        snaps_total = 0.0
+
+        for record in data.iter_rows(named=True):
+            season = record.get("season")
+            team_value = str(record.get("team") or "").upper()
+            games_played = int(record.get("games_played") or 0)
+
+            completions = float(record.get("pass_completions") or 0.0)
+            attempts = float(record.get("pass_attempts") or 0.0)
+            pass_yards_total = float(record.get("passing_yards") or 0.0)
+            pass_touchdowns = float(record.get("passing_tds") or 0.0)
+            interceptions = float(record.get("passing_ints") or 0.0)
+            sacks_taken = float(record.get("sacks_taken") or 0.0)
+            sack_yards_lost = float(record.get("sack_yards") or 0.0)
+
+            rush_attempts = float(record.get("rushing_attempts") or 0.0)
+            rush_yards_total = float(record.get("rushing_yards") or 0.0)
+            rush_touchdowns = float(record.get("rushing_tds") or 0.0)
+
+            fumbles_lost = float(record.get("fumbles_lost") or 0.0)
+
+            dropbacks = attempts + sacks_taken
+            snaps_played = dropbacks + rush_attempts
+            snaps_total += snaps_played
+
+            completion_pct = (completions / attempts * 100.0) if attempts > 0 else 0.0
+            touchdown_pct = (pass_touchdowns / attempts * 100.0) if attempts > 0 else 0.0
+            interception_pct = (interceptions / attempts * 100.0) if attempts > 0 else 0.0
+            yards_per_attempt = (pass_yards_total / attempts) if attempts > 0 else 0.0
+            yards_per_completion = (pass_yards_total / completions) if completions > 0 else 0.0
+            sack_pct = (sacks_taken / dropbacks * 100.0) if dropbacks > 0 else 0.0
+            negative_yards_per_attempt = (-sack_yards_lost / dropbacks) if dropbacks > 0 else 0.0
+            any_yards_per_attempt = (
+                (pass_yards_total + 20 * pass_touchdowns - 45 * interceptions - sack_yards_lost) / dropbacks
+                if dropbacks > 0
+                else 0.0
+            )
+            rush_yards_per_attempt = (rush_yards_total / rush_attempts) if rush_attempts > 0 else 0.0
+
+            total_touchdowns = pass_touchdowns + rush_touchdowns
+            total_turnovers = interceptions + fumbles_lost
+            total_yards = pass_yards_total + rush_yards_total
+
+            age_value = self._compute_age_for_season(player, int(season) if season is not None else None)
+            team_record = ""
+            if team_value and season is not None:
+                try:
+                    record_tuple = self._service.get_team_record(team_value, int(season))
+                    team_record = self._format_team_record(*record_tuple)
+                except Exception:  # pragma: no cover - defensive
+                    team_record = ""
+
+            qb_rating = self._calculate_passer_rating(
+                completions,
+                attempts,
+                pass_yards_total,
+                pass_touchdowns,
+                interceptions,
+            )
+
+            row_values = [
+                self._format_value(season),
+                self._format_optional_int(age_value),
+                self._format_value(team_value),
+                team_record or "—",
+                self._format_int(games_played),
+                self._format_int(snaps_played),
+                self._format_float(qb_rating, 1),
+                self._format_int(total_touchdowns),
+                self._format_int(total_turnovers),
+                self._format_int(total_yards),
+                self._format_int(completions),
+                self._format_int(attempts),
+                self._format_float(completion_pct, 1),
+                self._format_int(pass_yards_total),
+                self._format_int(pass_touchdowns),
+                self._format_float(touchdown_pct, 2),
+                self._format_int(interceptions),
+                self._format_float(interception_pct, 2),
+                self._format_float(yards_per_attempt, 2),
+                self._format_float(yards_per_completion, 2),
+                self._format_int(sacks_taken),
+                self._format_float(sack_pct, 2),
+                self._format_int(-abs(sack_yards_lost)),
+            ]
+            rows.append(row_values)
+
+        def _sum(column: str) -> float:
+            try:
+                return float(data[column].sum())
+            except Exception:
+                return 0.0
+
+        summary = {
+            "pass_yards": _sum("passing_yards"),
+            "rush_yards": _sum("rushing_yards"),
+            "receiving_yards": _sum("receiving_yards"),
+            "total_touchdowns": _sum("passing_tds") + _sum("rushing_tds"),
+            "games": _sum("games_played"),
+            "snaps": float(snaps_total),
+        }
+        return rows, summary
+
+    def _build_qb_table_rows(
+        self,
+        player: Player,
+        data: pl.DataFrame,
+        original_stats: pl.DataFrame,
+    ) -> tuple[list[list[str]], dict[str, float]]:
+        """Construct quarterback-specific season rows with advanced metrics."""
+
+        team_expr = (
+            self._coalesce_expr(
+                data,
+                ["team", "team_abbr", "recent_team", "current_team_abbr"],
+                alias="_team",
+                default="",
+                dtype=pl.Utf8,
+            )
+            .str.strip_chars()
+            .str.to_uppercase()
+            .alias("_team")
+        )
+
+        games_expr = (
+            self._coalesce_expr(
+                data,
+                ["games", "games_played", "games_active"],
+                alias="_games_raw",
+                default=0,
+                dtype=pl.Float64,
+            )
+            .cast(pl.Float64, strict=False)
+            .alias("_games_raw")
+        )
+
+        week_col = "week" if "week" in data.columns else None
+
+        def _num(col: str) -> pl.Expr:
+            return (
+                pl.col(col).cast(pl.Float64, strict=False).fill_null(0)
+                if col in data.columns
+                else pl.lit(0.0)
+            )
+
+        pass_comp = _num("completions").alias("_pass_comp")
+        pass_att = _num("attempts").alias("_pass_att")
+        pass_yds = _num("passing_yards").alias("_pass_yds")
+        pass_td = _num("passing_tds").alias("_pass_td")
+        pass_int = _num("passing_interceptions").alias("_pass_int")
+        sacks_taken = _num("sacks_suffered").alias("_sacks_taken")
+        sack_yards = _num("sack_yards_lost").alias("_sack_yards")
+        sack_fumbles = _num("sack_fumbles").alias("_sack_fumbles")
+        sack_fumbles_lost = _num("sack_fumbles_lost").alias("_sack_fumbles_lost")
+        rush_att = _num("carries").alias("_rush_att")
+        rush_yds = _num("rushing_yards").alias("_rush_yds")
+        rush_td = _num("rushing_tds").alias("_rush_td")
+        rush_fumbles = _num("rushing_fumbles").alias("_rush_fumbles")
+        rush_fumbles_lost = _num("rushing_fumbles_lost").alias("_rush_fumbles_lost")
+
+        prepared = data.with_columns(
+            [
+                team_expr,
+                games_expr,
+                pass_comp,
+                pass_att,
+                pass_yds,
+                pass_td,
+                pass_int,
+                sacks_taken,
+                sack_yards,
+                sack_fumbles,
+                sack_fumbles_lost,
+                rush_att,
+                rush_yds,
+                rush_td,
+                rush_fumbles,
+                rush_fumbles_lost,
+            ]
+        )
+        prepared = prepared.with_columns(
+            pl.col("_team")
+            .replace("", None)
+            .alias("_team"),
+        )
+        if week_col is not None:
+            prepared = prepared.with_columns(
+                pl.col(week_col).cast(pl.Int64, strict=False).alias("_week")
+            )
+        else:
+            prepared = prepared.with_columns(pl.lit(None).alias("_week"))
+
+        agg_exprs: list[pl.Expr] = [
+            pl.col("season").alias("season"),
+            pl.col("_team").alias("_team"),
+            pl.col("_games_raw").max().alias("_games_raw"),
+        ]
+        if week_col is not None:
+            agg_exprs.append(pl.col(week_col).cast(pl.Int64, strict=False).alias("_week"))
+
+        aggregation = prepared.group_by("season", "_team").agg(
+            pl.col("_games_raw").max().alias("_games_raw"),
+            pl.col("_week").drop_nulls().n_unique().alias("_games_from_weeks"),
+            pl.col("_pass_comp").sum().alias("_pass_comp"),
+            pl.col("_pass_att").sum().alias("_pass_att"),
+            pl.col("_pass_yds").sum().alias("_pass_yds"),
+            pl.col("_pass_td").sum().alias("_pass_td"),
+            pl.col("_pass_int").sum().alias("_pass_int"),
+            pl.col("_sacks_taken").sum().alias("_sacks_taken"),
+            pl.col("_sack_yards").sum().alias("_sack_yards"),
+            pl.col("_sack_fumbles").sum().alias("_sack_fumbles"),
+            pl.col("_sack_fumbles_lost").sum().alias("_sack_fumbles_lost"),
+            pl.col("_rush_att").sum().alias("_rush_att"),
+            pl.col("_rush_yds").sum().alias("_rush_yds"),
+            pl.col("_rush_td").sum().alias("_rush_td"),
+            pl.col("_rush_fumbles").sum().alias("_rush_fumbles"),
+            pl.col("_rush_fumbles_lost").sum().alias("_rush_fumbles_lost"),
+        )
+
+        aggregated = (
+            aggregation.with_columns(
+                pl.when(pl.col("_games_raw") > 0)
+                .then(pl.col("_games_raw"))
+                .otherwise(pl.col("_games_from_weeks"))
+                .cast(pl.Int64, strict=False)
+                .alias("_games")
+            )
+            .sort(["season", "_team"], descending=[True, False])
+        )
+
+        rows: list[list[str]] = []
+        snaps_total = 0.0
+        for row in aggregated.iter_rows(named=True):
+            season = row.get("season")
+            team_value = row.get("_team") or ""
+            if not team_value:
+                team_value = self._infer_team_for_row(row, original_stats)
+            season_int = int(season) if season is not None else None
+            age_value = self._compute_age_for_season(player, season_int) if season_int is not None else None
+            record_tuple = (0, 0, 0)
+            if season_int is not None and team_value and hasattr(self._service, "get_team_record"):
+                try:
+                    record_tuple = self._service.get_team_record(team_value, season_int)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("Failed to fetch team record for %s %s: %s", team_value, season_int, exc)
+                    record_tuple = (0, 0, 0)
+            team_record = self._format_team_record(*record_tuple)
+
+            games_played = int(row.get("_games") or 0)
+            completions = float(row.get("_pass_comp") or 0.0)
+            attempts = float(row.get("_pass_att") or 0.0)
+            pass_yards_total = float(row.get("_pass_yds") or 0.0)
+            pass_touchdowns = float(row.get("_pass_td") or 0.0)
+            interceptions = float(row.get("_pass_int") or 0.0)
+            sacks_taken = float(row.get("_sacks_taken") or 0.0)
+            sack_yards_lost = float(row.get("_sack_yards") or 0.0)
+            sack_fumbles_total = float(row.get("_sack_fumbles") or 0.0)
+            sack_fumbles_lost = float(row.get("_sack_fumbles_lost") or 0.0)
+            rush_attempts = float(row.get("_rush_att") or 0.0)
+            rush_yards_total = float(row.get("_rush_yds") or 0.0)
+            rush_touchdowns = float(row.get("_rush_td") or 0.0)
+            rush_fumbles_total = float(row.get("_rush_fumbles") or 0.0)
+            rush_fumbles_lost = float(row.get("_rush_fumbles_lost") or 0.0)
+
+            dropbacks = attempts + sacks_taken
+            snaps_played = dropbacks + rush_attempts
+            snaps_total += snaps_played
+
+            completion_pct = (completions / attempts * 100.0) if attempts > 0 else 0.0
+            touchdown_pct = (pass_touchdowns / attempts * 100.0) if attempts > 0 else 0.0
+            interception_pct = (interceptions / attempts * 100.0) if attempts > 0 else 0.0
+            yards_per_attempt = (pass_yards_total / attempts) if attempts > 0 else 0.0
+            yards_per_completion = (pass_yards_total / completions) if completions > 0 else 0.0
+            sack_pct = (sacks_taken / dropbacks * 100.0) if dropbacks > 0 else 0.0
+            negative_yards_per_attempt = (-sack_yards_lost / dropbacks) if dropbacks > 0 else 0.0
+            any_yards_per_attempt = (
+                (pass_yards_total + 20 * pass_touchdowns - 45 * interceptions - sack_yards_lost) / dropbacks
+                if dropbacks > 0
+                else 0.0
+            )
+            rush_yards_per_attempt = (rush_yards_total / rush_attempts) if rush_attempts > 0 else 0.0
+            total_touchdowns = pass_touchdowns + rush_touchdowns
+            total_turnovers = interceptions + rush_fumbles_lost + sack_fumbles_lost
+            total_yards = pass_yards_total + rush_yards_total
+            qb_rating = self._calculate_passer_rating(completions, attempts, pass_yards_total, pass_touchdowns, interceptions)
+
+            row_values = [
+                self._format_value(season),
+                self._format_optional_int(age_value),
+                self._format_value(team_value),
+                team_record or "—",
+                self._format_int(games_played),
+                self._format_int(snaps_played),
+                self._format_float(qb_rating, 1),
+                self._format_int(total_touchdowns),
+                self._format_int(total_turnovers),
+                self._format_int(total_yards),
+                self._format_int(completions),
+                self._format_int(attempts),
+                self._format_float(completion_pct, 1),
+                self._format_int(pass_yards_total),
+                self._format_int(pass_touchdowns),
+                self._format_float(touchdown_pct, 2),
+                self._format_int(interceptions),
+                self._format_float(interception_pct, 2),
+                self._format_float(yards_per_attempt, 2),
+                self._format_float(yards_per_completion, 2),
+                self._format_int(sacks_taken),
+                self._format_float(sack_pct, 2),
+                self._format_int(-abs(sack_yards_lost)),
+            ]
+            rows.append(row_values)
+
+        summary = {
+            "pass_yards": float(aggregated["_pass_yds"].sum() or 0),
+            "rush_yards": float(aggregated["_rush_yds"].sum() or 0),
+            "receiving_yards": 0.0,
+            "total_touchdowns": float((aggregated["_pass_td"].sum() or 0) + (aggregated["_rush_td"].sum() or 0)),
+            "games": float(aggregated["_games"].sum() or 0),
+            "snaps": float(snaps_total),
+        }
+        return rows, summary
+
+    def _compute_age_for_season(self, player: Player, season: int | None) -> int | None:
+        """Compute player age on September 1 of the given season."""
+
+        if season is None or not player.profile.birth_date:
+            return None
+        birth = player.profile.birth_date
+        try:
+            reference = date(season, 9, 1)
+        except ValueError:
+            reference = date(season, 9, 1 if season >= birth.year else birth.day)
+        age = reference.year - birth.year - (
+            (reference.month, reference.day) < (birth.month, birth.day)
+        )
+        return age
+
+    @staticmethod
+    def _calculate_passer_rating(
+        completions: float,
+        attempts: float,
+        yards: float,
+        touchdowns: float,
+        interceptions: float,
+    ) -> float:
+        """Calculate the traditional NFL passer rating."""
+
+        if attempts <= 0:
+            return 0.0
+
+        a = max(0.0, min(2.375, (completions / attempts - 0.3) * 5))
+        b = max(0.0, min(2.375, (yards / attempts - 3) * 0.25))
+        c = max(0.0, min(2.375, (touchdowns / attempts) * 20))
+        d = max(0.0, min(2.375, 2.375 - (interceptions / attempts) * 25))
+        return ((a + b + c + d) / 6) * 100
+
+    @staticmethod
+    def _format_float(value: float | int | None, decimals: int = 1) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, float) and math.isnan(value):
+            return ""
+        format_str = f"{{:.{decimals}f}}"
+        return format_str.format(float(value))
+
+    @staticmethod
+    def _format_team_record(wins: int, losses: int, ties: int) -> str:
+        if wins == losses == ties == 0:
+            return ""
+        if ties:
+            return f"{wins}-{losses}-{ties}"
+        return f"{wins}-{losses}"
 
     def _infer_team_for_row(self, row: dict[str, Any], stats: pl.DataFrame) -> str:
         """Infer team abbreviation for a given season row when missing."""

@@ -7,6 +7,7 @@ Desktop clone of the OOTP26 player experience for real NFL data. The UI is built
 - Python 3.10 or newer
 - Windows/macOS/Linux with Qt 6 runtime (installed automatically via PySide6)
 - Internet access the first time nflverse assets are fetched (nflreadpy caches on demand)
+- Optional: network access to Pro-Football-Reference when using the scraper helpers
 
 ## Installation
 
@@ -87,6 +88,22 @@ The CLI still exercises the same domain layer (`Player`, nflreadpy wrappers) and
 - `PlayerService` exposes the app-facing API: search summaries, instantiate `Player` objects, cached stats fetches, rating baselines (computed from multi-season aggregates), and light utility helpers.
 - Heavy nflverse payloads are cached in memory per session; we avoid writing to disk beyond nflreadpy’s internal cache.
 - Contract/injury data is currently sparse – UI shows placeholders until we wire an external provider.
+
+## Pro-Football-Reference scraping helpers
+
+PFR data is collected via the modules under `down_data/data/pfr/`:
+
+- `client.PFRClient` – polite `requests` session with user-agent, caching, and delay controls.
+- `html.py` – resilient table extraction (handles comment-wrapped tables, multi-index headers, duplicate column names).
+- `league.py`, `teams.py`, `players.py` – convenience wrappers that convert tables into Polars frames.
+
+Coach-specific utilities live in `down_data/data/pfr/players.py` (for player/coach tables) and share the same HTML helpers. All scraper surfaces are covered by unit tests in `tests/test_pfr_html_utils.py`, `tests/test_pfr_players.py`, `tests/test_pfr_teams.py`, and `tests/test_pfr_league.py`:
+
+```bash
+python -m unittest tests.test_pfr_html_utils tests.test_pfr_players tests.test_pfr_teams tests.test_pfr_league
+```
+
+Refer to those tests for example usage (e.g., fetching coach tables by ID, pulling team schedules, or loading league-wide advanced stats).
 
 ## Styling and design resources
 

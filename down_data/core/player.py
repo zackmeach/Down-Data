@@ -484,8 +484,15 @@ class Player:
         *,
         seasons: bool | Iterable[int] | None = None,
         season_type: str | None = None,
+        summary_level: str | None = "week",
     ) -> pl.DataFrame:
-        """Return nflverse player stats for the supplied season filters."""
+        """Return nflverse player stats for the supplied season filters.
+
+        Args:
+            seasons: Iterable of season years, ``True`` for all seasons, or ``None``.
+            season_type: Optional season type filter (e.g., "REG", "POST").
+            summary_level: Optional nflreadpy summary level hint. Defaults to weekly data.
+        """
 
         if seasons not in (None, True):
             valid_seasons, invalid_seasons = self.validate_seasons(seasons)
@@ -500,16 +507,27 @@ class Player:
         prepared_seasons = self._prepare_season_param(seasons)
         if prepared_seasons is not None:
             params["seasons"] = prepared_seasons
-        if season_type is not None:
-            params["season_type"] = season_type
+        if summary_level:
+            params["summary_level"] = summary_level
 
         try:
             stats = load_player_stats(**params)
-            filtered = stats.filter(pl.col("player_id") == self.profile.gsis_id)
-            self._cache["stats"] = filtered
-            return filtered
+        except TypeError as exc:
+            # Older versions of nflreadpy may not accept summary_level; fall back gracefully.
+            if "summary_level" in params:
+                fallback_params = dict(params)
+                fallback_params.pop("summary_level", None)
+                try:
+                    stats = load_player_stats(**fallback_params)
+                except TypeError:
+                    raise
+                logger.debug(
+                    "load_player_stats rejected summary_level=%s; using library defaults",
+                    summary_level,
+                )
+            else:
+                raise
         except ConnectionError as e:
-            # Provide helpful context if the download fails
             error_msg = str(e)
             if "404" in error_msg:
                 raise SeasonNotAvailableError(
@@ -517,6 +535,44 @@ class Player:
                     f"Stats are only available from {EARLIEST_SEASON_AVAILABLE} to {LATEST_SEASON_AVAILABLE}."
                 ) from e
             raise
+
+        if not isinstance(stats, pl.DataFrame):
+            stats = pl.DataFrame(stats)
+
+        if stats.height == 0:
+            filtered = stats
+        else:
+            filtered = stats
+            gsis_id = self.profile.gsis_id
+            if gsis_id and "player_id" in filtered.columns:
+                filtered = filtered.filter(pl.col("player_id") == gsis_id)
+            elif "player_display_name" in filtered.columns:
+                filtered = filtered.filter(
+                    pl.col("player_display_name")
+                    .cast(pl.Utf8, strict=False)
+                    .str.to_lowercase()
+                    == self.profile.full_name.lower()
+                )
+            elif "player_name" in filtered.columns:
+                filtered = filtered.filter(
+                    pl.col("player_name")
+                    .cast(pl.Utf8, strict=False)
+                    .str.to_lowercase()
+                    == self.profile.full_name.lower()
+                )
+
+        if season_type:
+            season_type_upper = season_type.upper()
+            if "season_type" in filtered.columns:
+                filtered = filtered.filter(pl.col("season_type") == season_type_upper)
+            elif season_type_upper != "REG":
+                logger.debug(
+                    "Season type filter '%s' requested but 'season_type' column unavailable",
+                    season_type_upper,
+                )
+
+        self._cache["stats"] = filtered
+        return filtered
 
     def cached_stats(self) -> pl.DataFrame | None:
         """Return cached stats if they have been fetched previously."""
