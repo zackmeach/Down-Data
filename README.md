@@ -105,11 +105,12 @@ python -m unittest tests.test_pfr_html_utils tests.test_pfr_players tests.test_p
 
 Refer to those tests for example usage (e.g., fetching coach tables by ID, pulling team schedules, or loading league-wide advanced stats).
 
-## Styling and design resources
+## Styling, architecture, and design resources
 
 - `docs/ui/GRID_SYSTEM.md` – coordinate system and usage.
 - `docs/ui/UI_DESIGN_GUIDE.md` – colour tokens, typography, spacing.
 - `docs/ui/PANEL_ARCHITECTURE.md` & `docs/ui/COMPONENT_REUSABILITY_GUIDE.md` – compose new widgets consistently.
+- `docs/ARCHITECTURE.md` – layer diagram, data flow, caching strategy, and extension playbook.
 
 Apply new palettes or typography by editing `down_data/ui/styles.py` (the palette is applied globally via `apply_app_palette` in `app.py`).
 

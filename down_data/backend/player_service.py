@@ -15,6 +15,7 @@ import polars as pl
 from down_data.core import Player, PlayerProfile, PlayerQuery, PlayerNotFoundError
 from down_data.core.ratings import RatingBreakdown
 from .offense_stats_repository import BasicOffenseStatsRepository
+from .basic_player_stats_repository import BasicPlayerStatsRepository
 
 try:  # pragma: no cover - defensive import
     from nflreadpy import load_players, load_player_stats, load_schedules
@@ -278,7 +279,14 @@ class PlayerService:
         self._rating_seasons = self._compute_rating_seasons()
         self._schedule_cache: dict[int, pl.DataFrame] = {}
         self._team_record_cache: dict[tuple[str, int, str], tuple[int, int, int]] = {}
+        self._qb_impact_cache: dict[tuple[str, str], dict[int, dict[str, float]]] = {}
+        self._defense_impact_cache: dict[tuple[str, str], dict[int, dict[str, float]]] = {}
+        self._skill_impact_cache: dict[tuple[str, str], dict[int, dict[str, float]]] = {}
+        self._offensive_line_impact_cache: dict[tuple[str, str], dict[int, dict[str, float]]] = {}
+        self._kicker_impact_cache: dict[tuple[str, str], dict[int, dict[str, float]]] = {}
+        self._punter_impact_cache: dict[tuple[str, str], dict[int, dict[str, float]]] = {}
         self._offense_stats_repository = BasicOffenseStatsRepository()
+        self._basic_player_stats_repository = BasicPlayerStatsRepository()
 
     def get_all_players(self) -> pl.DataFrame:
         """Get the full player directory as a DataFrame for filtering."""
@@ -422,6 +430,43 @@ class PlayerService:
             )
             return pl.DataFrame()
 
+    def get_basic_player_stats(
+        self,
+        *,
+        player_id: str | None = None,
+        player_ids: Iterable[str] | None = None,
+        seasons: Iterable[int] | None = None,
+        team: str | None = None,
+        position: str | None = None,
+        refresh_cache: bool = False,
+    ) -> pl.DataFrame:
+        """Return cached multi-positional stats from the aggregated player cache."""
+
+        try:
+            identifiers: list[str] | None = None
+            if player_id or player_ids:
+                ids: list[str] = []
+                if player_id:
+                    ids.append(str(player_id))
+                if player_ids:
+                    ids.extend(str(pid) for pid in player_ids)
+                identifiers = ids
+
+            return self._basic_player_stats_repository.query(
+                player_ids=identifiers or None,
+                seasons=seasons,
+                team=team,
+                position=position,
+                refresh=refresh_cache,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to load basic player cache (refresh=%s): %s",
+                refresh_cache,
+                exc,
+            )
+            return pl.DataFrame()
+
     def _load_schedule(self, season: int) -> pl.DataFrame:
         """Fetch and cache the league schedule for the given season."""
 
@@ -510,6 +555,573 @@ class PlayerService:
 
         self._team_record_cache[cache_key] = (wins, losses, ties)
         return (wins, losses, ties)
+
+    def get_quarterback_epa_wpa(
+        self,
+        player: Player,
+        *,
+        seasons: Iterable[int] | None = None,
+        season_type: str = "REG",
+    ) -> dict[int, dict[str, float]]:
+        """Aggregate QB EPA/WPA totals per season using play-by-play data."""
+
+        identifier = player.profile.gsis_id or player.profile.full_name
+        normalized_type = season_type.upper()
+        cache_key = (identifier, normalized_type)
+        cache_map = self._qb_impact_cache.setdefault(cache_key, {})
+
+        def _build_result(targets: list[int] | None) -> dict[int, dict[str, float]]:
+            if targets:
+                return {season: dict(cache_map[season]) for season in targets if season in cache_map}
+            return {season: dict(values) for season, values in cache_map.items()}
+
+        season_list: list[int] | None = None
+        if seasons is not None:
+            season_list = sorted({int(season) for season in seasons if season is not None})
+
+        if season_list:
+            missing = [season for season in season_list if season not in cache_map]
+            if not missing:
+                return _build_result(season_list)
+            pbp_seasons: bool | Iterable[int] = missing
+        else:
+            if cache_map:
+                return _build_result(None)
+            pbp_seasons = True
+
+        try:
+            pbp = player.fetch_pbp(seasons=pbp_seasons)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Failed to fetch play-by-play for %s: %s", identifier, exc)
+            return _build_result(season_list)
+
+        if pbp.is_empty() or "season" not in pbp.columns:
+            return _build_result(season_list)
+
+        filtered = pbp
+        if "season_type" in filtered.columns:
+            filtered = filtered.filter(pl.col("season_type").str.to_uppercase() == normalized_type)
+
+        if filtered.is_empty():
+            return _build_result(season_list)
+
+        player_id = player.profile.gsis_id
+
+        epa_expr: pl.Expr | None = None
+        if "qb_epa" in filtered.columns:
+            epa_expr = pl.col("qb_epa").cast(pl.Float64, strict=False).fill_null(0.0).alias("_qb_epa_value")
+        elif player_id and "epa" in filtered.columns:
+            epa_stat = pl.col("epa").cast(pl.Float64, strict=False).fill_null(0.0)
+            qb_conditions = []
+            if "passer_player_id" in filtered.columns:
+                qb_conditions.append(pl.col("passer_player_id") == player_id)
+            if "rusher_player_id" in filtered.columns:
+                qb_conditions.append(pl.col("rusher_player_id") == player_id)
+            if qb_conditions:
+                epa_expr = (
+                    pl.when(pl.any_horizontal(qb_conditions))
+                    .then(epa_stat)
+                    .otherwise(0.0)
+                    .alias("_qb_epa_value")
+                )
+
+        wpa_expr: pl.Expr | None = None
+        if "qb_wpa" in filtered.columns:
+            wpa_expr = pl.col("qb_wpa").cast(pl.Float64, strict=False).fill_null(0.0).alias("_qb_wpa_value")
+        elif player_id and "wpa" in filtered.columns:
+            wpa_stat = pl.col("wpa").cast(pl.Float64, strict=False).fill_null(0.0)
+            qb_conditions = []
+            if "passer_player_id" in filtered.columns:
+                qb_conditions.append(pl.col("passer_player_id") == player_id)
+            if "rusher_player_id" in filtered.columns:
+                qb_conditions.append(pl.col("rusher_player_id") == player_id)
+            if qb_conditions:
+                wpa_expr = (
+                    pl.when(pl.any_horizontal(qb_conditions))
+                    .then(wpa_stat)
+                    .otherwise(0.0)
+                    .alias("_qb_wpa_value")
+                )
+
+        agg_exprs: list[pl.Expr] = []
+        working = filtered
+        if epa_expr is not None:
+            working = working.with_columns(epa_expr)
+            agg_exprs.append(pl.col("_qb_epa_value").sum().alias("_qb_epa_total"))
+        if wpa_expr is not None:
+            working = working.with_columns(wpa_expr)
+            agg_exprs.append(pl.col("_qb_wpa_value").sum().alias("_qb_wpa_total"))
+
+        if not agg_exprs:
+            return _build_result(season_list)
+
+        grouped = (
+            working.group_by("season")
+            .agg(agg_exprs)
+            .sort("season")
+        )
+
+        for row in grouped.iter_rows(named=True):
+            season_value = row.get("season")
+            if season_value is None:
+                continue
+            entry: dict[str, float] = {}
+            epa_total = row.get("_qb_epa_total")
+            if epa_total is not None:
+                entry["epa"] = float(epa_total)
+            wpa_total = row.get("_qb_wpa_total")
+            if wpa_total is not None:
+                entry["wpa"] = float(wpa_total)
+            if entry:
+                cache_map[int(season_value)] = entry
+
+        return _build_result(season_list)
+
+    def get_skill_player_impacts(
+        self,
+        player: Player,
+        *,
+        seasons: Iterable[int] | None = None,
+        season_type: str = "REG",
+    ) -> dict[int, dict[str, float]]:
+        """Aggregate EPA/WPA and explosive-play counts for rushing/receiving roles."""
+
+        identifier = player.profile.gsis_id or player.profile.full_name
+        normalized_type = season_type.upper()
+        cache_key = (identifier, normalized_type)
+        cache_map = self._skill_impact_cache.setdefault(cache_key, {})
+
+        def _build_result(targets: list[int] | None) -> dict[int, dict[str, float]]:
+            if targets:
+                return {season: dict(cache_map[season]) for season in targets if season in cache_map}
+            return {season: dict(values) for season, values in cache_map.items()}
+
+        season_list: list[int] | None = None
+        if seasons is not None:
+            season_list = sorted({int(season) for season in seasons if season is not None})
+
+        if season_list:
+            missing = [season for season in season_list if season not in cache_map]
+            if not missing:
+                return _build_result(season_list)
+            pbp_seasons: bool | Iterable[int] = missing
+        else:
+            if cache_map:
+                return _build_result(None)
+            pbp_seasons = True
+
+        player_id = player.profile.gsis_id
+        if not player_id:
+            return _build_result(season_list)
+
+        try:
+            pbp = player.fetch_pbp(seasons=pbp_seasons)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Failed to fetch skill-impact play-by-play for %s: %s", identifier, exc)
+            return _build_result(season_list)
+
+        if pbp.is_empty() or "season" not in pbp.columns:
+            return _build_result(season_list)
+
+        filtered = pbp
+        if "season_type" in filtered.columns:
+            filtered = filtered.filter(pl.col("season_type").str.to_uppercase() == normalized_type)
+
+        if filtered.is_empty():
+            return _build_result(season_list)
+
+        rusher_columns = (
+            "rusher_player_id",
+            "lateral_rusher_player_id",
+        )
+        receiver_columns = (
+            "receiver_player_id",
+            "lateral_receiver_player_id",
+            "target_player_id",
+            "targeted_player_id",
+        )
+
+        rusher_matchers = [pl.col(column) == player_id for column in rusher_columns if column in filtered.columns]
+        receiver_matchers = [pl.col(column) == player_id for column in receiver_columns if column in filtered.columns]
+
+        if not rusher_matchers and not receiver_matchers:
+            return _build_result(season_list)
+
+        working = filtered.with_columns(
+            pl.any_horizontal(rusher_matchers).alias("_is_rusher") if rusher_matchers else pl.lit(False).alias("_is_rusher"),
+            pl.any_horizontal(receiver_matchers).alias("_is_receiver") if receiver_matchers else pl.lit(False).alias("_is_receiver"),
+        )
+
+        impact_columns: list[pl.Expr] = []
+        if "epa" in working.columns:
+            impact_columns.append(
+                pl.when(pl.col("_is_rusher") | pl.col("_is_receiver"))
+                .then(pl.col("epa").cast(pl.Float64, strict=False).fill_null(0.0))
+                .otherwise(0.0)
+                .alias("_skill_epa")
+            )
+        else:
+            impact_columns.append(pl.lit(0.0).alias("_skill_epa"))
+
+        if "wpa" in working.columns:
+            impact_columns.append(
+                pl.when(pl.col("_is_rusher") | pl.col("_is_receiver"))
+                .then(pl.col("wpa").cast(pl.Float64, strict=False).fill_null(0.0))
+                .otherwise(0.0)
+                .alias("_skill_wpa")
+            )
+        else:
+            impact_columns.append(pl.lit(0.0).alias("_skill_wpa"))
+
+        yards_col = "yards_gained" if "yards_gained" in working.columns else None
+        complete_col = "complete_pass" if "complete_pass" in working.columns else None
+        first_down_col = "first_down" if "first_down" in working.columns else None
+
+        if yards_col:
+            yards_expr = pl.col(yards_col).cast(pl.Float64, strict=False).fill_null(0.0)
+            rush_condition = pl.col("_is_rusher") & (yards_expr >= 20)
+            rec_condition = pl.col("_is_receiver") & (yards_expr >= 20)
+            if complete_col in working.columns:
+                rec_condition = rec_condition & (pl.col(complete_col) == 1)
+            impact_columns.extend(
+                [
+                    pl.when(rush_condition).then(1).otherwise(0).alias("_rush_20_plus"),
+                    pl.when(rec_condition).then(1).otherwise(0).alias("_rec_20_plus"),
+                ]
+            )
+        else:
+            impact_columns.extend([pl.lit(0).alias("_rush_20_plus"), pl.lit(0).alias("_rec_20_plus")])
+
+        if first_down_col:
+            impact_columns.append(
+                pl.when(pl.col("_is_receiver") & (pl.col(first_down_col) == 1))
+                .then(1)
+                .otherwise(0)
+                .alias("_rec_first_downs")
+            )
+        else:
+            impact_columns.append(pl.lit(0).alias("_rec_first_downs"))
+
+        working = working.with_columns(impact_columns)
+
+        grouped = (
+            working.group_by("season")
+            .agg(
+                pl.col("_skill_epa").sum().alias("_skill_epa_total"),
+                pl.col("_skill_wpa").sum().alias("_skill_wpa_total"),
+                pl.col("_rush_20_plus").sum().alias("_rush_20_plus"),
+                pl.col("_rec_20_plus").sum().alias("_rec_20_plus"),
+                pl.col("_rec_first_downs").sum().alias("_rec_first_downs"),
+            )
+            .sort("season")
+        )
+
+        for row in grouped.iter_rows(named=True):
+            season_value = row.get("season")
+            if season_value is None:
+                continue
+            cache_map[int(season_value)] = {
+                "epa": float(row.get("_skill_epa_total") or 0.0),
+                "wpa": float(row.get("_skill_wpa_total") or 0.0),
+                "rush_20_plus": float(row.get("_rush_20_plus") or 0.0),
+                "rec_20_plus": float(row.get("_rec_20_plus") or 0.0),
+                "rec_first_downs": float(row.get("_rec_first_downs") or 0.0),
+            }
+
+        return _build_result(season_list)
+
+    def get_defensive_player_impacts(
+        self,
+        player: Player,
+        *,
+        seasons: Iterable[int] | None = None,
+        season_type: str = "REG",
+    ) -> dict[int, dict[str, float]]:
+        """Aggregate defensive EPA/WPA for plays where the defender is credited with an action."""
+
+        identifier = player.profile.gsis_id or player.profile.full_name
+        normalized_type = season_type.upper()
+        cache_key = (identifier, normalized_type)
+        cache_map = self._defense_impact_cache.setdefault(cache_key, {})
+
+        def _build_result(targets: list[int] | None) -> dict[int, dict[str, float]]:
+            if targets:
+                return {season: dict(cache_map[season]) for season in targets if season in cache_map}
+            return {season: dict(values) for season, values in cache_map.items()}
+
+        season_list: list[int] | None = None
+        if seasons is not None:
+            season_list = sorted({int(season) for season in seasons if season is not None})
+
+        if season_list:
+            missing = [season for season in season_list if season not in cache_map]
+            if not missing:
+                return _build_result(season_list)
+            pbp_seasons: bool | Iterable[int] = missing
+        else:
+            if cache_map:
+                return _build_result(None)
+            pbp_seasons = True
+
+        player_id = player.profile.gsis_id
+        if not player_id:
+            return _build_result(season_list)
+
+        try:
+            pbp = player.fetch_pbp(seasons=pbp_seasons)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Failed to fetch defensive play-by-play for %s: %s", identifier, exc)
+            return _build_result(season_list)
+
+        if pbp.is_empty() or "season" not in pbp.columns:
+            return _build_result(season_list)
+
+        filtered = pbp
+        if "season_type" in filtered.columns:
+            filtered = filtered.filter(pl.col("season_type").str.to_uppercase() == normalized_type)
+
+        if filtered.is_empty():
+            return _build_result(season_list)
+
+        defensive_columns = [
+            "solo_tackle_1_player_id",
+            "solo_tackle_2_player_id",
+            "assist_tackle_1_player_id",
+            "assist_tackle_2_player_id",
+            "assist_tackle_3_player_id",
+            "assist_tackle_4_player_id",
+            "tackle_with_assist_1_player_id",
+            "tackle_with_assist_2_player_id",
+            "tackle_with_assist_3_player_id",
+            "tackle_with_assist_4_player_id",
+            "pass_defense_1_player_id",
+            "pass_defense_2_player_id",
+            "interception_player_id",
+            "sack_player_id",
+            "half_sack_1_player_id",
+            "half_sack_2_player_id",
+            "forced_fumble_player_1_player_id",
+            "forced_fumble_player_2_player_id",
+            "fumble_recovery_1_player_id",
+            "fumble_recovery_2_player_id",
+        ]
+
+        involvement_exprs = [
+            pl.col(column) == player_id for column in defensive_columns if column in filtered.columns
+        ]
+        if not involvement_exprs:
+            return _build_result(season_list)
+
+        working = filtered.with_columns(
+            pl.any_horizontal(involvement_exprs).alias("_def_involved"),
+        )
+
+        impact_columns: list[pl.Expr] = []
+        if "epa" in working.columns:
+            impact_columns.append(
+                pl.when(pl.col("_def_involved"))
+                .then(pl.col("epa").cast(pl.Float64, strict=False).fill_null(0.0))
+                .otherwise(0.0)
+                .alias("_def_epa")
+            )
+        else:
+            impact_columns.append(pl.lit(0.0).alias("_def_epa"))
+
+        if "wpa" in working.columns:
+            impact_columns.append(
+                pl.when(pl.col("_def_involved"))
+                .then(pl.col("wpa").cast(pl.Float64, strict=False).fill_null(0.0))
+                .otherwise(0.0)
+                .alias("_def_wpa")
+            )
+        else:
+            impact_columns.append(pl.lit(0.0).alias("_def_wpa"))
+
+        working = working.with_columns(impact_columns)
+
+        grouped = (
+            working.group_by("season")
+            .agg(
+                pl.col("_def_epa").sum().alias("_def_epa_total"),
+                pl.col("_def_wpa").sum().alias("_def_wpa_total"),
+            )
+            .sort("season")
+        )
+
+        for row in grouped.iter_rows(named=True):
+            season_value = row.get("season")
+            if season_value is None:
+                continue
+            cache_map[int(season_value)] = {
+                "epa": float(row.get("_def_epa_total") or 0.0),
+                "wpa": float(row.get("_def_wpa_total") or 0.0),
+            }
+
+        return _build_result(season_list)
+
+    def _collect_generic_impacts(
+        self,
+        player: Player,
+        *,
+        seasons: Iterable[int] | None,
+        season_type: str,
+        cache_store: dict[tuple[str, str], dict[int, dict[str, float]]],
+        involvement_columns: Sequence[str],
+    ) -> dict[int, dict[str, float]]:
+        identifier = player.profile.gsis_id or player.profile.full_name
+        normalized_type = season_type.upper()
+        cache_key = (identifier, normalized_type)
+        cache_map = cache_store.setdefault(cache_key, {})
+
+        def _build_result(targets: list[int] | None) -> dict[int, dict[str, float]]:
+            if targets:
+                return {season: dict(cache_map[season]) for season in targets if season in cache_map}
+            return {season: dict(values) for season, values in cache_map.items()}
+
+        season_list: list[int] | None = None
+        if seasons is not None:
+            season_list = sorted({int(season) for season in seasons if season is not None})
+
+        if season_list:
+            missing = [season for season in season_list if season not in cache_map]
+            if not missing:
+                return _build_result(season_list)
+            pbp_seasons: bool | Iterable[int] = missing
+        else:
+            if cache_map:
+                return _build_result(None)
+            pbp_seasons = True
+
+        player_id = player.profile.gsis_id
+        if not player_id:
+            return _build_result(season_list)
+
+        try:
+            pbp = player.fetch_pbp(seasons=pbp_seasons)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Failed to fetch play-by-play for %s: %s", identifier, exc)
+            return _build_result(season_list)
+
+        if pbp.is_empty() or "season" not in pbp.columns:
+            return _build_result(season_list)
+
+        filtered = pbp
+        if "season_type" in filtered.columns:
+            filtered = filtered.filter(pl.col("season_type").str.to_uppercase() == normalized_type)
+
+        if filtered.is_empty():
+            return _build_result(season_list)
+
+        involvement_exprs = [
+            pl.col(column) == player_id for column in involvement_columns if column in filtered.columns
+        ]
+
+        if not involvement_exprs:
+            return _build_result(season_list)
+
+        working = filtered.with_columns(pl.any_horizontal(involvement_exprs).alias("_involved"))
+
+        epa_expr = (
+            pl.when(pl.col("_involved"))
+            .then(pl.col("epa").cast(pl.Float64, strict=False).fill_null(0.0))
+            .otherwise(0.0)
+            .alias("_generic_epa")
+            if "epa" in working.columns
+            else pl.lit(0.0).alias("_generic_epa")
+        )
+        wpa_expr = (
+            pl.when(pl.col("_involved"))
+            .then(pl.col("wpa").cast(pl.Float64, strict=False).fill_null(0.0))
+            .otherwise(0.0)
+            .alias("_generic_wpa")
+            if "wpa" in working.columns
+            else pl.lit(0.0).alias("_generic_wpa")
+        )
+
+        working = working.with_columns([epa_expr, wpa_expr])
+
+        grouped = (
+            working.group_by("season")
+            .agg(
+                pl.col("_generic_epa").sum().alias("_generic_epa_total"),
+                pl.col("_generic_wpa").sum().alias("_generic_wpa_total"),
+            )
+            .sort("season")
+        )
+
+        for row in grouped.iter_rows(named=True):
+            season_value = row.get("season")
+            if season_value is None:
+                continue
+            cache_map[int(season_value)] = {
+                "epa": float(row.get("_generic_epa_total") or 0.0),
+                "wpa": float(row.get("_generic_wpa_total") or 0.0),
+            }
+
+        return _build_result(season_list)
+
+    def get_offensive_line_impacts(
+        self,
+        player: Player,
+        *,
+        seasons: Iterable[int] | None = None,
+        season_type: str = "REG",
+    ) -> dict[int, dict[str, float]]:
+        """Aggregate EPA/WPA for offensive linemen (primarily via penalties)."""
+
+        involvement_columns = [
+            "penalty_player_id",
+            "penalty_player_id_1",
+            "penalty_player_id_2",
+        ]
+        return self._collect_generic_impacts(
+            player,
+            seasons=seasons,
+            season_type=season_type,
+            cache_store=self._offensive_line_impact_cache,
+            involvement_columns=involvement_columns,
+        )
+
+    def get_kicker_impacts(
+        self,
+        player: Player,
+        *,
+        seasons: Iterable[int] | None = None,
+        season_type: str = "REG",
+    ) -> dict[int, dict[str, float]]:
+        """Aggregate EPA/WPA for kickers (field goals, PATs, kickoffs)."""
+
+        involvement_columns = [
+            "kicker_player_id",
+            "kickoff_player_id",
+        ]
+        return self._collect_generic_impacts(
+            player,
+            seasons=seasons,
+            season_type=season_type,
+            cache_store=self._kicker_impact_cache,
+            involvement_columns=involvement_columns,
+        )
+
+    def get_punter_impacts(
+        self,
+        player: Player,
+        *,
+        seasons: Iterable[int] | None = None,
+        season_type: str = "REG",
+    ) -> dict[int, dict[str, float]]:
+        """Aggregate EPA/WPA for punters."""
+
+        involvement_columns = [
+            "punter_player_id",
+        ]
+        return self._collect_generic_impacts(
+            player,
+            seasons=seasons,
+            season_type=season_type,
+            cache_store=self._punter_impact_cache,
+            involvement_columns=involvement_columns,
+        )
 
     # --------------------------------------------------------------------- #
     # Rating helpers
