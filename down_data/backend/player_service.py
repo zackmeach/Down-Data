@@ -23,6 +23,7 @@ from .offense_stats_repository import BasicOffenseStatsRepository
 from .basic_player_stats_repository import BasicPlayerStatsRepository
 from .player_impact_repository import PlayerImpactRepository
 from .player_summary_repository import PlayerSummaryRepository
+from .nfl_data_repository import NFLDataRepository
 
 try:  # pragma: no cover - defensive import
     from nflreadpy import load_players, load_player_stats, load_schedules, load_contracts
@@ -385,6 +386,23 @@ class PlayerService:
         self._player_impact_repository = PlayerImpactRepository()
         self._player_summary_repository = PlayerSummaryRepository()
         self._player_bio_cache: pl.DataFrame | None = None
+        # New unified data repository (preferred data source)
+        self._nfl_data_repository: NFLDataRepository | None = None
+
+    @property
+    def nfl_data(self) -> NFLDataRepository:
+        """Get the NFL Data Repository instance (lazy initialization)."""
+        if self._nfl_data_repository is None:
+            self._nfl_data_repository = NFLDataRepository(auto_initialize=True)
+        return self._nfl_data_repository
+
+    def _use_nfl_datastore(self) -> bool:
+        """Check if the new NFL data store is available and should be used."""
+        try:
+            from down_data.data.nfl_datastore import DATA_DIRECTORY
+            return (DATA_DIRECTORY / "players.parquet").exists()
+        except Exception:
+            return False
 
     def get_all_players(self) -> pl.DataFrame:
         """Get the full player directory as a DataFrame for filtering."""
@@ -535,11 +553,26 @@ class PlayerService:
         seasons: Iterable[int] | None = None,
         refresh_cache: bool = False,
     ) -> pl.DataFrame:
-        """Return season-level stats from the summary cache."""
-
+        """Return season-level stats from the summary cache.
+        
+        Prefers the new NFL Data Store when available, falling back to
+        the legacy cache system otherwise.
+        """
         if not player_id:
             return pl.DataFrame()
 
+        # Try new data store first
+        if self._use_nfl_datastore():
+            try:
+                result = self.nfl_data.get_player_summary(player_id, seasons=seasons)
+                if result.height > 0:
+                    return result
+            except Exception as exc:
+                logger.debug(
+                    "Failed to query NFL data store for %s: %s", player_id, exc
+                )
+
+        # Fall back to legacy repository
         try:
             return self._player_summary_repository.query(
                 player_ids=[str(player_id)],
@@ -568,18 +601,37 @@ class PlayerService:
         position: str | None = None,
         refresh_cache: bool = False,
     ) -> pl.DataFrame:
-        """Return cached multi-positional stats from the aggregated player cache."""
+        """Return cached multi-positional stats from the aggregated player cache.
+        
+        Prefers the new NFL Data Store when available.
+        """
+        identifiers: list[str] | None = None
+        if player_id or player_ids:
+            ids: list[str] = []
+            if player_id:
+                ids.append(str(player_id))
+            if player_ids:
+                ids.extend(str(pid) for pid in player_ids)
+            identifiers = ids
 
+        # Try new data store first
+        if self._use_nfl_datastore():
+            try:
+                result = self.nfl_data.get_summary_stats(
+                    player_ids=identifiers,
+                    seasons=seasons,
+                    team=team,
+                    position=position,
+                )
+                if result.height > 0:
+                    return result
+            except Exception as exc:
+                logger.debug(
+                    "Failed to query NFL data store: %s", exc
+                )
+
+        # Fall back to legacy repository
         try:
-            identifiers: list[str] | None = None
-            if player_id or player_ids:
-                ids: list[str] = []
-                if player_id:
-                    ids.append(str(player_id))
-                if player_ids:
-                    ids.extend(str(pid) for pid in player_ids)
-                identifiers = ids
-
             return self._basic_player_stats_repository.query(
                 player_ids=identifiers or None,
                 seasons=seasons,
@@ -596,17 +648,31 @@ class PlayerService:
             return pl.DataFrame()
 
     def _load_cached_impacts(self, player: Player, seasons: Sequence[int]) -> pl.DataFrame:
-        """Return cached impact rows for the player when available."""
-
+        """Return cached impact rows for the player when available.
+        
+        Prefers the new NFL Data Store when available.
+        """
         if not seasons:
-            return pl.DataFrame()
-
-        repo = getattr(self, "_player_impact_repository", None)
-        if repo is None:
             return pl.DataFrame()
 
         player_id = player.profile.gsis_id
         if not player_id:
+            return pl.DataFrame()
+
+        # Try new data store first
+        if self._use_nfl_datastore():
+            try:
+                result = self.nfl_data.get_player_impacts(player_id, seasons=seasons)
+                if result.height > 0:
+                    return result
+            except Exception as exc:
+                logger.debug(
+                    "Failed to query NFL data store impacts for %s: %s", player_id, exc
+                )
+
+        # Fall back to legacy repository
+        repo = getattr(self, "_player_impact_repository", None)
+        if repo is None:
             return pl.DataFrame()
 
         try:
@@ -660,17 +726,38 @@ class PlayerService:
         return self._player_bio_cache
 
     def fetch_player_bio_details(self, player: Player) -> dict[str, str]:
-        """Return handedness and birthplace info, scraping PFR when needed."""
-
+        """Return handedness and birthplace info, scraping PFR when needed.
+        
+        Prefers the new NFL Data Store when available for bio data that has
+        already been fetched, falling back to PFR scraping for missing data.
+        """
+        gsis_id = player.profile.gsis_id
         pfr_id = player.profile.pfr_id
+
+        # Try new data store first (for already-fetched bio data)
+        if gsis_id and self._use_nfl_datastore():
+            try:
+                bio = self.nfl_data.get_player_bio(gsis_id)
+                # Check if bio has real data (not just N/A placeholders)
+                if bio and any(
+                    v and v != "N/A" for k, v in bio.items() 
+                    if k in ("handedness", "birth_city", "birth_state")
+                ):
+                    return bio
+            except Exception as exc:
+                logger.debug("Failed to get bio from data store for %s: %s", gsis_id, exc)
+
+        # If no PFR ID, we can't fetch from PFR
         if not pfr_id:
             return {}
 
+        # Try legacy cache
         cache = self._get_player_bio_cache()
         match = cache.filter(pl.col("pfr_id") == pfr_id)
         if match.height > 0:
             return match.to_dicts()[0]
 
+        # Fetch from PFR
         try:
             payload, updated_cache = fetch_and_cache_player_bio(
                 pfr_id=pfr_id,
@@ -680,6 +767,14 @@ class PlayerService:
             return {}
 
         self._player_bio_cache = updated_cache
+        
+        # Also update new data store if available
+        if gsis_id and self._use_nfl_datastore():
+            try:
+                self.nfl_data.update_player_bio(gsis_id, payload)
+            except Exception:
+                pass
+        
         return payload
 
     def get_team_record(

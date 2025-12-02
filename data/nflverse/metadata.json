@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0.0",
+  "season_start": 1999,
+  "season_end": 2024,
+  "players_last_updated": "2025-12-02T18:56:46.009347",
+  "player_seasons_last_updated": "2025-12-02T18:02:45.655730",
+  "player_impacts_last_updated": "2025-12-02T18:03:34.454294",
+  "total_players": 24340,
+  "total_player_seasons": 49504,
+  "total_impacts": 41842,
+  "errors": []
+}
