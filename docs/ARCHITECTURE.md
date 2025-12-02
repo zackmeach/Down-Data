@@ -92,11 +92,24 @@ Dependencies only flow downward; higher layers never import inward.
 
 ### Repositories
 
+**Primary (Preferred):**
+
+* `NFLDataRepository` – Unified access to the NFL Data Store. Provides:
+  * `get_player()` / `get_players()` – Static player info
+  * `get_player_seasons()` – Season-level statistics
+  * `get_player_impacts()` – EPA/WPA metrics
+  * `get_player_summary()` – Combined data for UI
+  * `get_player_bio()` – Birthplace, handedness (static data)
+
+**Legacy (Fallback):**
+
 * `BasicOffenseStatsRepository` – qb-focused parquet cache (historical seasons).
-* `BasicPlayerStatsRepository` – new general-purpose cache wrapper
-  (`data/basic_cache.py`) so every position can hydrate season rows without
-  touching the network.
-* Additional repositories should follow the same template:
+* `BasicPlayerStatsRepository` – general-purpose cache wrapper
+  (`data/basic_cache.py`).
+* `PlayerSummaryRepository` – merged cache with stats + impacts.
+* `PlayerImpactRepository` – EPA/WPA cache from play-by-play.
+
+All repositories follow the template:
   * `ensure_cache()` – build/refresh if missing.
   * `scan()`/`load()` – lazy vs eager access.
   * `query()` – typed filters (player IDs, seasons, team, position).
@@ -117,10 +130,51 @@ it can be reused by CLI/tests without Qt.
 
 ## Data Providers
 
+### NFL Data Store (`down_data/data/nfl_datastore.py`) – **Primary Data System**
+
+The NFL Data Store is the preferred, structured database system for NFL player
+data. Unlike legacy caches, it is designed to be:
+
+* **Persistent** – Data is intentionally stored and managed, not temporary.
+* **Structured** – Well-defined schemas with known features and date ranges.
+* **Updateable** – Can expand date ranges (e.g., 1999-2024 → 1999-2025).
+* **Refreshable** – Any subset of data can be updated independently.
+* **Efficient** – Avoids redundant fetching (birthplace doesn't change yearly).
+* **Error-aware** – Graceful error handling with flagging for review.
+
+**Data Tables:**
+
+| Table | Path | Description |
+| --- | --- | --- |
+| `players` | `data/nflverse/players.parquet` | Static player info (bio, birthplace, college, draft) |
+| `player_seasons` | `data/nflverse/player_seasons.parquet` | Season-level statistics (games, snaps, stats) |
+| `player_impacts` | `data/nflverse/player_impacts.parquet` | EPA/WPA metrics by player-season |
+| `metadata` | `data/nflverse/metadata.json` | Schema version, date ranges, error log |
+
+**Key Classes:**
+
+* `NFLDataStore` – Core data access and storage manager.
+* `NFLDataBuilder` – Orchestrates data refresh from nflverse sources.
+* `NFLDataRepository` (`backend/nfl_data_repository.py`) – Clean query interface.
+
+**Build Command:**
+
+```bash
+python scripts/build_nfl_datastore.py                    # Full build
+python scripts/build_nfl_datastore.py --seasons 2024    # Update single season
+python scripts/build_nfl_datastore.py --status          # Check status
+```
+
+### Legacy Cache System (deprecated, still functional)
+
 * `down_data/data/basic_cache.py` – build/scan the all-player season cache.
 * `down_data/data/basic_offense.py` – qb/offense-specific aggregation.
 * `down_data/data/pfr/*` – HTML scrapers and tests.
 * `scripts/build_basic_cache.py` – CLI hook to prebuild caches.
+
+**Migration Note:** The system automatically prefers the new NFL Data Store when
+available, falling back to legacy caches. Build the new store with
+`scripts/build_nfl_datastore.py` to take advantage of the improved architecture.
 
 When introducing a new long-lived dataset, add a module under `down_data/data/`
 plus a repository facade under `down_data/backend/`.
@@ -129,15 +183,30 @@ plus a repository facade under `down_data/backend/`.
 
 ## Cross-Cutting Concerns
 
-### Caching Strategy
+### Data Storage Strategy
 
-| Layer | Cache | Notes |
+| Layer | Storage | Notes |
 | --- | --- | --- |
 | UI session | `PlayerService._stats_cache` | in-memory Polars keyed by player+filters |
-| Disk | `basic_offense` / `basic_cache` | Parquet aggregates served via repositories |
+| **NFL Data Store** | `data/nflverse/*.parquet` | **Preferred** – structured player database |
+| Legacy disk | `data/cache/*.parquet` | Deprecated – basic_offense / basic_cache |
 | nflreadpy | built-in | first network fetch seeds `%APPDATA%`/`~/.cache` |
 
-Always attempt caches in this order: repository → service cache → remote.
+**Data Access Priority:**
+
+1. NFL Data Store (if initialized) – Unified, structured data
+2. Legacy repositories (fallback) – For backward compatibility
+3. Service session cache – In-memory for repeated queries
+4. Remote nflverse – Only when local data unavailable
+
+**Efficiency Features:**
+
+The NFL Data Store separates static and dynamic data:
+- **Static** (players table): Bio, birthplace, college – fetched once
+- **Dynamic** (player_seasons table): Stats that change yearly
+- **Computed** (player_impacts table): EPA/WPA metrics from play-by-play
+
+This prevents redundant fetching (e.g., birthplace doesn't change year-to-year).
 
 ### Concurrency
 
