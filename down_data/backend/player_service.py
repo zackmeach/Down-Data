@@ -14,15 +14,23 @@ import polars as pl
 
 from down_data.core import Player, PlayerProfile, PlayerQuery, PlayerNotFoundError
 from down_data.core.ratings import RatingBreakdown
+from down_data.data.player_bio_cache import (
+    load_player_bio_cache,
+    upsert_player_bio_entries,
+    fetch_and_cache_player_bio,
+)
 from .offense_stats_repository import BasicOffenseStatsRepository
 from .basic_player_stats_repository import BasicPlayerStatsRepository
+from .player_impact_repository import PlayerImpactRepository
+from .player_summary_repository import PlayerSummaryRepository
 
 try:  # pragma: no cover - defensive import
-    from nflreadpy import load_players, load_player_stats, load_schedules
+    from nflreadpy import load_players, load_player_stats, load_schedules, load_contracts
 except ImportError:  # pragma: no cover - imported dynamically in some environments
     load_players = None  # type: ignore
     load_player_stats = None  # type: ignore
     load_schedules = None  # type: ignore
+    load_contracts = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +183,7 @@ class PlayerDirectory:
 
     def __init__(self) -> None:
         self._frame: pl.DataFrame | None = None
+        self._contracts: pl.DataFrame | None = None
 
     @staticmethod
     def _to_polars(frame: object) -> pl.DataFrame:
@@ -188,6 +197,80 @@ class PlayerDirectory:
             raise TypeError(
                 f"Unsupported frame type returned by nflreadpy.load_players: {type(frame)!r}"
             ) from exc
+
+    def _load_contracts_frame(self) -> pl.DataFrame:
+        if self._contracts is not None:
+            return self._contracts
+        if load_contracts is None:
+            logger.debug("nflreadpy.load_contracts unavailable; skipping contract enrichment")
+            self._contracts = pl.DataFrame()
+            return self._contracts
+        try:
+            loaded = load_contracts()
+            contracts = self._to_polars(loaded)
+        except Exception as exc:  # pragma: no cover - runtime fetch can fail without network
+            logger.warning("Failed to load player contracts: %s", exc)
+            self._contracts = pl.DataFrame()
+            return self._contracts
+
+        if "gsis_id" not in contracts.columns:
+            self._contracts = pl.DataFrame()
+            return self._contracts
+
+        wanted_columns = [
+            "gsis_id",
+            "otc_id",
+            "year_signed",
+            "years",
+            "value",
+            "guaranteed",
+            "apy",
+            "apy_cap_pct",
+            "inflated_value",
+            "inflated_apy",
+            "inflated_guaranteed",
+            "player_page",
+        ]
+        available = [column for column in wanted_columns if column in contracts.columns]
+        if not available:
+            self._contracts = pl.DataFrame()
+            return self._contracts
+
+        shaped = contracts.select(
+            [
+                pl.col("gsis_id")
+                .cast(pl.Utf8, strict=False)
+                .str.strip_chars()
+                .alias("gsis_id"),
+                *(
+                    pl.col(column).alias("contract_player_page" if column == "player_page" else ("contract_otc_id" if column == "otc_id" else column))
+                    for column in available
+                    if column != "gsis_id"
+                ),
+            ]
+        ).filter(pl.col("gsis_id").is_not_null() & (pl.col("gsis_id") != ""))
+
+        if "year_signed" in shaped.columns:
+            shaped = shaped.sort("year_signed", nulls_last=True)
+        shaped = shaped.unique(subset=["gsis_id"], keep="last")
+
+        if {"year_signed", "years"}.issubset(set(shaped.columns)):
+            shaped = shaped.with_columns(
+                pl.when(
+                    pl.col("year_signed").is_not_null() & pl.col("years").is_not_null()
+                )
+                .then(
+                    (
+                        pl.col("year_signed").cast(pl.Float64, strict=False)
+                        + pl.col("years").cast(pl.Float64, strict=False)
+                        - 1
+                    ).cast(pl.Int64, strict=False)
+                )
+                .alias("signed_through")
+            )
+
+        self._contracts = shaped
+        return self._contracts
 
     @cached_property
     def frame(self) -> pl.DataFrame:
@@ -227,6 +310,18 @@ class PlayerDirectory:
             pl.col("position").fill_null(""),
             pl.col("recent_team").fill_null(""),
         )
+
+        contracts = self._load_contracts_frame()
+        if contracts.height > 0 and "gsis_id" in normalised.columns:
+            normalised = normalised.join(contracts, on="gsis_id", how="left")
+            if "contract_otc_id" in normalised.columns and "otc_id" in normalised.columns:
+                normalised = normalised.with_columns(
+                    pl.when(pl.col("otc_id").is_null() | (pl.col("otc_id") == ""))
+                    .then(pl.col("contract_otc_id"))
+                    .otherwise(pl.col("otc_id"))
+                    .alias("otc_id")
+                ).drop("contract_otc_id")
+
         return normalised
 
     def search(
@@ -287,6 +382,9 @@ class PlayerService:
         self._punter_impact_cache: dict[tuple[str, str], dict[int, dict[str, float]]] = {}
         self._offense_stats_repository = BasicOffenseStatsRepository()
         self._basic_player_stats_repository = BasicPlayerStatsRepository()
+        self._player_impact_repository = PlayerImpactRepository()
+        self._player_summary_repository = PlayerSummaryRepository()
+        self._player_bio_cache: pl.DataFrame | None = None
 
     def get_all_players(self) -> pl.DataFrame:
         """Get the full player directory as a DataFrame for filtering."""
@@ -430,6 +528,36 @@ class PlayerService:
             )
             return pl.DataFrame()
 
+    def get_player_summary_stats(
+        self,
+        *,
+        player_id: str | None = None,
+        seasons: Iterable[int] | None = None,
+        refresh_cache: bool = False,
+    ) -> pl.DataFrame:
+        """Return season-level stats from the summary cache."""
+
+        if not player_id:
+            return pl.DataFrame()
+
+        try:
+            return self._player_summary_repository.query(
+                player_ids=[str(player_id)],
+                seasons=seasons,
+                refresh=refresh_cache,
+            )
+        except FileNotFoundError:
+            logger.debug(
+                "Player summary cache missing; falling back to legacy stat sources."
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to load player summary cache (refresh=%s): %s",
+                refresh_cache,
+                exc,
+            )
+        return pl.DataFrame()
+
     def get_basic_player_stats(
         self,
         *,
@@ -467,6 +595,33 @@ class PlayerService:
             )
             return pl.DataFrame()
 
+    def _load_cached_impacts(self, player: Player, seasons: Sequence[int]) -> pl.DataFrame:
+        """Return cached impact rows for the player when available."""
+
+        if not seasons:
+            return pl.DataFrame()
+
+        repo = getattr(self, "_player_impact_repository", None)
+        if repo is None:
+            return pl.DataFrame()
+
+        player_id = player.profile.gsis_id
+        if not player_id:
+            return pl.DataFrame()
+
+        try:
+            return repo.query(player_ids=[player_id], seasons=seasons)
+        except FileNotFoundError:
+            logger.debug("Player impact cache missing; falling back to live computations.")
+        except Exception as exc:
+            logger.debug(
+                "Failed to query player impact cache for %s (%s): %s",
+                player.profile.full_name,
+                player_id,
+                exc,
+            )
+        return pl.DataFrame()
+
     def _load_schedule(self, season: int) -> pl.DataFrame:
         """Fetch and cache the league schedule for the given season."""
 
@@ -487,6 +642,45 @@ class PlayerService:
 
         self._schedule_cache[season] = schedule
         return schedule
+
+    def _get_player_bio_cache(self) -> pl.DataFrame:
+        if self._player_bio_cache is None:
+            try:
+                self._player_bio_cache = load_player_bio_cache()
+            except Exception:
+                self._player_bio_cache = pl.DataFrame(
+                    {
+                        "pfr_id": [],
+                        "handedness": [],
+                        "birth_city": [],
+                        "birth_state": [],
+                        "birth_country": [],
+                    }
+                )
+        return self._player_bio_cache
+
+    def fetch_player_bio_details(self, player: Player) -> dict[str, str]:
+        """Return handedness and birthplace info, scraping PFR when needed."""
+
+        pfr_id = player.profile.pfr_id
+        if not pfr_id:
+            return {}
+
+        cache = self._get_player_bio_cache()
+        match = cache.filter(pl.col("pfr_id") == pfr_id)
+        if match.height > 0:
+            return match.to_dicts()[0]
+
+        try:
+            payload, updated_cache = fetch_and_cache_player_bio(
+                pfr_id=pfr_id,
+                cache=cache,
+            )
+        except Exception:
+            return {}
+
+        self._player_bio_cache = updated_cache
+        return payload
 
     def get_team_record(
         self,
@@ -581,9 +775,27 @@ class PlayerService:
 
         if season_list:
             missing = [season for season in season_list if season not in cache_map]
+            if missing:
+                repo_frame = self._load_cached_impacts(player, missing)
+                repo_populated: set[int] = set()
+                for row in repo_frame.iter_rows(named=True):
+                    season_value = row.get("season")
+                    if season_value is None:
+                        continue
+                    entry: dict[str, float] = {}
+                    epa_value = row.get("qb_epa")
+                    if epa_value is not None:
+                        entry["epa"] = float(epa_value)
+                    wpa_value = row.get("qb_wpa")
+                    if wpa_value is not None:
+                        entry["wpa"] = float(wpa_value)
+                    if entry:
+                        cache_map[int(season_value)] = entry
+                        repo_populated.add(int(season_value))
+                missing = [season for season in missing if season not in repo_populated]
             if not missing:
                 return _build_result(season_list)
-            pbp_seasons: bool | Iterable[int] = missing
+            pbp_seasons = missing
         else:
             if cache_map:
                 return _build_result(None)
@@ -702,9 +914,26 @@ class PlayerService:
 
         if season_list:
             missing = [season for season in season_list if season not in cache_map]
+            if missing:
+                repo_frame = self._load_cached_impacts(player, missing)
+                repo_populated: set[int] = set()
+                for row in repo_frame.iter_rows(named=True):
+                    season_value = row.get("season")
+                    if season_value is None:
+                        continue
+                    entry = {
+                        "epa": float(row.get("skill_epa") or 0.0),
+                        "wpa": float(row.get("skill_wpa") or 0.0),
+                        "rush_20_plus": float(row.get("skill_rush_20_plus") or 0.0),
+                        "rec_20_plus": float(row.get("skill_rec_20_plus") or 0.0),
+                        "rec_first_downs": float(row.get("skill_rec_first_downs") or 0.0),
+                    }
+                    cache_map[int(season_value)] = entry
+                    repo_populated.add(int(season_value))
+                missing = [season for season in missing if season not in repo_populated]
             if not missing:
                 return _build_result(season_list)
-            pbp_seasons: bool | Iterable[int] = missing
+            pbp_seasons = missing
         else:
             if cache_map:
                 return _build_result(None)
@@ -855,9 +1084,24 @@ class PlayerService:
 
         if season_list:
             missing = [season for season in season_list if season not in cache_map]
+            if missing:
+                repo_frame = self._load_cached_impacts(player, missing)
+                repo_populated: set[int] = set()
+                for row in repo_frame.iter_rows(named=True):
+                    season_value = row.get("season")
+                    if season_value is None:
+                        continue
+                    entry = {
+                        "epa": float(row.get("def_epa") or 0.0),
+                        "wpa": float(row.get("def_wpa") or 0.0),
+                    }
+                    if entry:
+                        cache_map[int(season_value)] = entry
+                        repo_populated.add(int(season_value))
+                missing = [season for season in missing if season not in repo_populated]
             if not missing:
                 return _build_result(season_list)
-            pbp_seasons: bool | Iterable[int] = missing
+            pbp_seasons = missing
         else:
             if cache_map:
                 return _build_result(None)
@@ -967,6 +1211,7 @@ class PlayerService:
         season_type: str,
         cache_store: dict[tuple[str, str], dict[int, dict[str, float]]],
         involvement_columns: Sequence[str],
+        impact_prefix: str | None = None,
     ) -> dict[int, dict[str, float]]:
         identifier = player.profile.gsis_id or player.profile.full_name
         normalized_type = season_type.upper()
@@ -984,6 +1229,23 @@ class PlayerService:
 
         if season_list:
             missing = [season for season in season_list if season not in cache_map]
+            if missing and impact_prefix:
+                repo_frame = self._load_cached_impacts(player, missing)
+                repo_populated: set[int] = set()
+                epa_column = f"{impact_prefix}_epa"
+                wpa_column = f"{impact_prefix}_wpa"
+                for row in repo_frame.iter_rows(named=True):
+                    season_value = row.get("season")
+                    if season_value is None:
+                        continue
+                    entry = {
+                        "epa": float(row.get(epa_column) or 0.0),
+                        "wpa": float(row.get(wpa_column) or 0.0),
+                    }
+                    if entry:
+                        cache_map[int(season_value)] = entry
+                        repo_populated.add(int(season_value))
+                missing = [season for season in missing if season not in repo_populated]
             if not missing:
                 return _build_result(season_list)
             pbp_seasons: bool | Iterable[int] = missing
@@ -1080,6 +1342,7 @@ class PlayerService:
             season_type=season_type,
             cache_store=self._offensive_line_impact_cache,
             involvement_columns=involvement_columns,
+            impact_prefix="ol",
         )
 
     def get_kicker_impacts(
@@ -1101,6 +1364,7 @@ class PlayerService:
             season_type=season_type,
             cache_store=self._kicker_impact_cache,
             involvement_columns=involvement_columns,
+            impact_prefix="kicker",
         )
 
     def get_punter_impacts(
@@ -1121,6 +1385,7 @@ class PlayerService:
             season_type=season_type,
             cache_store=self._punter_impact_cache,
             involvement_columns=involvement_columns,
+            impact_prefix="punter",
         )
 
     # --------------------------------------------------------------------- #

@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 from datetime import datetime
+import time
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 import logging
 
 import polars as pl
+from requests import HTTPError
 
 try:  # pragma: no cover - optional dependency
-    from nflreadpy import load_player_stats
+    from nflreadpy import load_player_stats, load_rosters
 except ImportError:  # pragma: no cover - handled at runtime
     load_player_stats = None  # type: ignore[assignment]
+    load_rosters = None  # type: ignore[assignment]
+
+from .pfr.client import PFRClient
+from .pfr.snap_counts import fetch_team_snap_counts
+from .pfr.players import fetch_player_bio_fields
+from .player_bio_cache import (
+    load_player_bio_cache,
+    upsert_player_bio_entries,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CACHE_DIRECTORY = PROJECT_ROOT / "data" / "cache"
@@ -20,6 +31,51 @@ CACHE_PATH = CACHE_DIRECTORY / "basic_player_stats.parquet"
 DEFAULT_SEASONS = list(range(1999, datetime.now().year + 1))
 
 LOGGER = logging.getLogger(__name__)
+
+PFR_SNAP_MIN_SEASON = 2012
+TEAM_TO_PFR_SLUG: Mapping[str, str] = {
+    "ARI": "crd",
+    "ATL": "atl",
+    "BAL": "rav",
+    "BUF": "buf",
+    "CAR": "car",
+    "CHI": "chi",
+    "CIN": "cin",
+    "CLE": "cle",
+    "DAL": "dal",
+    "DEN": "den",
+    "DET": "det",
+    "GB": "gnb",
+    "GNB": "gnb",
+    "HOU": "htx",  # Texans (post-2002 seasons)
+    "IND": "clt",
+    "JAC": "jax",
+    "JAX": "jax",
+    "KC": "kan",
+    "KAN": "kan",
+    "LAC": "sdg",
+    "SD": "sdg",
+    "LAR": "ram",
+    "LA": "ram",
+    "STL": "ram",
+    "LV": "rai",
+    "LVR": "rai",
+    "OAK": "rai",
+    "MIA": "mia",
+    "MIN": "min",
+    "NE": "nwe",
+    "NO": "nor",
+    "NYG": "nyg",
+    "NYJ": "nyj",
+    "PHI": "phi",
+    "PIT": "pit",
+    "SEA": "sea",
+    "SF": "sfo",
+    "SFO": "sfo",
+    "TB": "tam",
+    "TEN": "oti",
+    "WAS": "was",
+}
 
 STRING_COLUMN_SOURCES: Mapping[str, Sequence[str]] = {
     "_team": ("recent_team", "team", "current_team_abbr"),
@@ -30,7 +86,8 @@ STRING_COLUMN_SOURCES: Mapping[str, Sequence[str]] = {
 }
 
 NUMERIC_COLUMN_SOURCES: Mapping[str, Sequence[str]] = {
-    "offense_snaps": ("offense_snaps",),
+    "offense_snaps": ("offense_snaps", "offense_snaps_played", "offensive_snaps"),
+    "offense_snaps_available": ("offense_snaps_available", "team_offense_snaps", "offense_total_snaps"),
     "defense_snaps": ("defense_snaps",),
     "special_teams_snaps": ("special_teams_snaps",),
     "pass_completions": ("pass_completions", "completions"),
@@ -49,6 +106,12 @@ NUMERIC_COLUMN_SOURCES: Mapping[str, Sequence[str]] = {
     "receiving_tds": ("receiving_tds", "rec_tds"),
     "total_fumbles": ("total_fumbles", "fumbles"),
     "fumbles_lost": ("fumbles_lost",),
+    "rushing_fumbles": ("rushing_fumbles",),
+    "rushing_fumbles_lost": ("rushing_fumbles_lost",),
+    "receiving_fumbles": ("receiving_fumbles",),
+    "receiving_fumbles_lost": ("receiving_fumbles_lost",),
+    "sack_fumbles": ("sack_fumbles",),
+    "sack_fumbles_lost": ("sack_fumbles_lost",),
     "def_tackles_solo": ("def_tackles_solo", "solo_tackles"),
     "def_tackle_assists": ("def_tackle_assists", "assist_tackles"),
     "def_tackles_for_loss": ("def_tackles_for_loss", "tackles_for_loss"),
@@ -95,6 +158,64 @@ NUMERIC_COLUMN_SOURCES: Mapping[str, Sequence[str]] = {
 }
 
 
+def _map_team_to_pfr_slug(team: str | None) -> str | None:
+    if not team:
+        return None
+    return TEAM_TO_PFR_SLUG.get(team.upper())
+
+
+def _fetch_snap_counts_with_retry(
+    client: PFRClient,
+    *,
+    team_abbr: str,
+    team_slug: str,
+    season: int,
+    retries: int = 4,
+) -> pl.DataFrame:
+    for attempt in range(retries):
+        try:
+            return fetch_team_snap_counts(client, team_slug=team_slug, season=season)
+        except HTTPError as exc:
+            status = getattr(exc.response, "status_code", None)
+            if status == 429 and attempt < retries - 1:
+                wait = 5.0 * (attempt + 1)
+                LOGGER.warning(
+                    "PFR rate-limited snap counts for %s (%s); retrying in %.1fs.",
+                    team_abbr,
+                    season,
+                    wait,
+                )
+                time.sleep(wait)
+                continue
+            raise
+    # Should never reach here because loop either returns or raises
+    raise RuntimeError("Exceeded retry attempts for PFR snap counts")
+
+
+def _fetch_player_bio_with_retry(
+    client: PFRClient,
+    *,
+    pfr_id: str,
+    retries: int = 3,
+) -> dict[str, str]:
+    for attempt in range(retries):
+        try:
+            return fetch_player_bio_fields(client, pfr_id)
+        except HTTPError as exc:
+            status = getattr(exc.response, "status_code", None)
+            if status == 429 and attempt < retries - 1:
+                wait = 2.0 * (attempt + 1)
+                LOGGER.warning(
+                    "PFR rate-limited bio details for %s; retrying in %.1fs.",
+                    pfr_id,
+                    wait,
+                )
+                time.sleep(wait)
+                continue
+            raise
+    raise RuntimeError("Exceeded retry attempts for PFR player bio")
+
+
 def cache_exists() -> bool:
     """Return ``True`` when the basic cache parquet already exists."""
 
@@ -135,6 +256,14 @@ def build_basic_cache(
     frame = _to_polars(raw)
     prepared = _prepare_for_aggregation(frame, target_seasons)
     aggregated = _aggregate_player_seasons(prepared)
+
+    id_mapping = _build_player_id_mapping(target_seasons)
+
+    # Merge snap counts from separate source
+    aggregated = _merge_snap_counts(aggregated, target_seasons, id_mapping=id_mapping)
+
+    # Merge player bio info from PFR
+    aggregated = _merge_player_bio(aggregated, id_mapping=id_mapping)
 
     CACHE_DIRECTORY.mkdir(parents=True, exist_ok=True)
     aggregated.write_parquet(CACHE_PATH, compression="zstd")
@@ -252,6 +381,277 @@ def _aggregate_player_seasons(frame: pl.DataFrame) -> pl.DataFrame:
     ).sort(["player_name", "season", "team"])
 
     return result
+
+
+def _build_player_id_mapping(seasons: Sequence[int]) -> pl.DataFrame | None:
+    """Build a mapping from gsis_id to pfr_id using roster data."""
+
+    if load_rosters is None:
+        return None
+
+    try:
+        roster_raw = load_rosters(seasons=list(seasons))
+        roster_frame = _to_polars(roster_raw)
+    except Exception as exc:  # pragma: no cover - network/runtime
+        LOGGER.warning("Failed to load rosters for ID mapping: %s", exc)
+        return None
+
+    if roster_frame.is_empty():
+        return None
+
+    if "gsis_id" not in roster_frame.columns or "pfr_id" not in roster_frame.columns:
+        return None
+
+    # Create unique mapping from gsis_id to pfr_id
+    mapping = (
+        roster_frame.select(["gsis_id", "pfr_id"])
+        .filter(pl.col("gsis_id").is_not_null() & pl.col("pfr_id").is_not_null())
+        .unique(subset=["gsis_id"])
+    )
+    return mapping
+
+
+def _merge_snap_counts(
+    aggregated: pl.DataFrame,
+    seasons: Sequence[int],
+    *,
+    id_mapping: pl.DataFrame | None = None,
+) -> pl.DataFrame:
+    """Merge snap counts scraped from Pro-Football-Reference into the stats."""
+
+    if aggregated.is_empty():
+        return aggregated
+
+    if id_mapping is None or id_mapping.is_empty():
+        LOGGER.warning("Could not build player ID mapping; snap counts will remain at 0.")
+        return aggregated
+
+    target_seasons = sorted(
+        {int(season) for season in seasons if season and season >= PFR_SNAP_MIN_SEASON}
+    )
+    if not target_seasons:
+        LOGGER.info(
+            "PFR snap counts are only available from %s onward; no merge performed.",
+            PFR_SNAP_MIN_SEASON,
+        )
+        return aggregated
+
+    season_team_frame = (
+        aggregated.select(["season", "team"])
+        .filter(
+            pl.col("team").is_not_null()
+            & (pl.col("team").str.strip_chars() != "")
+        )
+        .unique()
+    )
+    if season_team_frame.is_empty():
+        return aggregated
+
+    snap_frames: list[pl.DataFrame] = []
+    with PFRClient(enable_cache=True, min_delay=1.5) as client:
+        for season in target_seasons:
+            teams = (
+                season_team_frame.filter(pl.col("season") == season)["team"].to_list()
+            )
+            if not teams:
+                continue
+            for team in teams:
+                slug = _map_team_to_pfr_slug(team)
+                if not slug:
+                    LOGGER.debug("No PFR slug mapping for team '%s'; skipping.", team)
+                    continue
+                try:
+                    team_snaps = _fetch_snap_counts_with_retry(
+                        client,
+                        team_abbr=team.upper(),
+                        team_slug=slug,
+                        season=season,
+                    )
+                except Exception as exc:  # pragma: no cover - network/runtime
+                    LOGGER.warning(
+                        "Failed to fetch PFR snap counts for %s (%s): %s",
+                        team,
+                        season,
+                        exc,
+                    )
+                    continue
+                if team_snaps.is_empty():
+                    continue
+                snap_frames.append(
+                    team_snaps.with_columns(
+                        pl.lit(team.upper()).alias("team"),
+                        pl.lit(season).alias("season"),
+                    )
+                )
+
+    if not snap_frames:
+        LOGGER.warning("PFR snap-count scrape returned no rows; leaving snaps at 0.")
+        return aggregated
+
+    snap_aggregated = (
+        pl.concat(snap_frames, how="vertical_relaxed")
+        .filter(pl.col("pfr_id").is_not_null() & (pl.col("pfr_id") != ""))
+        .select(
+            [
+                pl.col("pfr_id").cast(pl.Utf8, strict=False),
+                pl.col("season").cast(pl.Int64, strict=False),
+                pl.col("team").cast(pl.Utf8, strict=False),
+                pl.col("_snap_offense").cast(pl.Int64, strict=False),
+                pl.col("_snap_defense").cast(pl.Int64, strict=False),
+                pl.col("_snap_st").cast(pl.Int64, strict=False),
+            ]
+        )
+    )
+
+    if snap_aggregated.is_empty():
+        LOGGER.warning("PFR snap-count data frame empty after filtering.")
+        return aggregated
+
+    aggregated_with_pfr = aggregated.join(
+        id_mapping,
+        left_on="player_id",
+        right_on="gsis_id",
+        how="left",
+    )
+
+    merged = aggregated_with_pfr.join(
+        snap_aggregated,
+        left_on=["pfr_id", "season", "team"],
+        right_on=["pfr_id", "season", "team"],
+        how="left",
+    )
+
+    # Update snap columns with merged values
+    update_exprs = []
+    if "_snap_offense" in merged.columns:
+        update_exprs.append(
+            pl.when(pl.col("_snap_offense").is_not_null() & (pl.col("_snap_offense") > 0))
+            .then(pl.col("_snap_offense"))
+            .otherwise(pl.col("offense_snaps"))
+            .cast(pl.Float64, strict=False)
+            .alias("offense_snaps")
+        )
+    if "_snap_defense" in merged.columns:
+        update_exprs.append(
+            pl.when(pl.col("_snap_defense").is_not_null() & (pl.col("_snap_defense") > 0))
+            .then(pl.col("_snap_defense"))
+            .otherwise(pl.col("defense_snaps"))
+            .cast(pl.Float64, strict=False)
+            .alias("defense_snaps")
+        )
+    if "_snap_st" in merged.columns:
+        update_exprs.append(
+            pl.when(pl.col("_snap_st").is_not_null() & (pl.col("_snap_st") > 0))
+            .then(pl.col("_snap_st"))
+            .otherwise(pl.col("special_teams_snaps"))
+            .cast(pl.Float64, strict=False)
+            .alias("special_teams_snaps")
+        )
+
+    if update_exprs:
+        merged = merged.with_columns(update_exprs)
+
+    # Drop temporary columns
+    drop_cols = [c for c in merged.columns if c.startswith("_snap_") or c == "pfr_id"]
+    if drop_cols:
+        merged = merged.drop(drop_cols)
+
+    return merged
+
+
+def _merge_player_bio(
+    aggregated: pl.DataFrame,
+    *,
+    id_mapping: pl.DataFrame | None,
+) -> pl.DataFrame:
+    """Attach PFR-derived bio info (handedness, birthplace) to the stats."""
+
+    if aggregated.is_empty():
+        return aggregated
+
+    if id_mapping is None or id_mapping.is_empty():
+        LOGGER.warning("Could not build player ID mapping; bio fields will remain 'N/A'.")
+        return aggregated.with_columns(
+            pl.lit("N/A").alias("handedness"),
+            pl.lit("N/A").alias("birth_city"),
+            pl.lit("N/A").alias("birth_state"),
+            pl.lit("N/A").alias("birth_country"),
+        )
+
+    bio_cache = load_player_bio_cache()
+
+    player_map = (
+        aggregated.select(["player_id"])
+        .unique()
+        .join(id_mapping, left_on="player_id", right_on="gsis_id", how="left")
+        .filter(pl.col("pfr_id").is_not_null() & (pl.col("pfr_id") != ""))
+    )
+
+    existing_ids = (
+        bio_cache.select(["pfr_id"]).unique()
+        if bio_cache.height > 0
+        else None
+    )
+    if existing_ids is not None:
+        missing = player_map.join(existing_ids, on="pfr_id", how="anti")
+    else:
+        missing = player_map
+
+    new_entries: list[dict[str, str]] = []
+    if missing.height > 0:
+        with PFRClient(enable_cache=True, min_delay=1.0) as client:
+            for row in missing.iter_rows(named=True):
+                pfr_id = row.get("pfr_id")
+                if not isinstance(pfr_id, str) or not pfr_id.strip():
+                    continue
+                try:
+                    bio = _fetch_player_bio_with_retry(client, pfr_id=pfr_id)
+                except Exception as exc:  # pragma: no cover - network/runtime
+                    LOGGER.warning("Failed to fetch PFR bio for %s: %s", pfr_id, exc)
+                    continue
+                new_entries.append(
+                    {
+                        "pfr_id": pfr_id,
+                        "handedness": bio.get("handedness") or "N/A",
+                        "birth_city": bio.get("birth_city") or "N/A",
+                        "birth_state": bio.get("birth_state") or "N/A",
+                        "birth_country": bio.get("birth_country") or "N/A",
+                    }
+                )
+
+    if new_entries:
+        bio_cache = upsert_player_bio_entries(bio_cache, new_entries)
+
+    if bio_cache.height == 0:
+        return aggregated.with_columns(
+            pl.lit("N/A").alias("handedness"),
+            pl.lit("N/A").alias("birth_city"),
+            pl.lit("N/A").alias("birth_state"),
+            pl.lit("N/A").alias("birth_country"),
+        )
+
+    merged = aggregated.join(
+        id_mapping,
+        left_on="player_id",
+        right_on="gsis_id",
+        how="left",
+    ).join(
+        bio_cache,
+        on="pfr_id",
+        how="left",
+    )
+
+    merged = merged.with_columns(
+        pl.col("handedness").fill_null("N/A"),
+        pl.col("birth_city").fill_null("N/A"),
+        pl.col("birth_state").fill_null("N/A"),
+        pl.col("birth_country").fill_null("N/A"),
+    )
+
+    drop_cols = [c for c in merged.columns if c == "pfr_id"]
+    if drop_cols:
+        merged = merged.drop(drop_cols)
+    return merged
 
 
 __all__ = [

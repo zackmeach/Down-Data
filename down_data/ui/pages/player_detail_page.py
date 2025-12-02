@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 import logging
 import math
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import polars as pl
 from PySide6.QtCore import Qt, Signal, QObject, QRunnable, QThreadPool
@@ -291,13 +291,24 @@ class PlayerDetailPage(SectionPage):
     PROFILE_SUBSECTIONS = ["Summary", "Contract", "Injury History"]
     RUNNING_BACK_POSITIONS = {"RB", "FB", "HB"}
     RECEIVER_POSITIONS = {"WR", "TE"}
-    OFFENSIVE_LINE_POSITIONS = {"OL", "LT", "LG", "RT", "RG", "C", "T", "G"}
+    OFFENSIVE_LINE_POSITIONS = {"OL", "OT", "LT", "LG", "RT", "RG", "C", "T", "G"}
     KICKER_POSITIONS = {"K"}
     PUNTER_POSITIONS = {"P"}
     DEFENSIVE_BACK_POSITIONS = {"DB", "CB", "FS", "SS", "S", "NB"}
     DEFENSIVE_FRONT_POSITIONS = {"DE", "DT", "DL", "NT", "LB", "ILB", "OLB", "MLB", "EDGE"}
     DEFENSIVE_BACK_POSITIONS = {"DB", "CB", "FS", "SS", "S", "NB"}
     DEFENSIVE_FRONT_POSITIONS = {"DE", "DT", "DL", "NT", "LB", "ILB", "OLB", "MLB", "EDGE"}
+    SNAP_COLUMN_ALIASES = {
+        "snps",
+        "snaps",
+        "snps played",
+        "snaps played",
+        "snps played*",
+        "snps played (est)",
+        "snps total",
+        "snaps total",
+        "snps (tot)",
+    }
     RUNNING_BACK_COLUMNS = [
         "Season",
         "Age",
@@ -707,9 +718,12 @@ class PlayerDetailPage(SectionPage):
         self._table_columns = payload.table_columns
         self._basic_ratings = payload.basic_ratings
         self._last_stats_frame = payload.stats_frame.clone()
+        payload_enriched = self._merge_summary_into_payload(payload.summary, payload.stats_frame)
 
         self._update_table_views()
         self._update_basic_ratings_views()
+        if payload_enriched:
+            self._update_personal_details_views()
         self._set_loading_state(False)
 
         if payload.fetch_impacts:
@@ -725,6 +739,124 @@ class PlayerDetailPage(SectionPage):
         logger.debug("Failed to load player details: %s", message)
         self._set_loading_state(False)
         self._advanced_worker_running = False
+
+    def _merge_summary_into_payload(
+        self,
+        summary: Mapping[str, float] | None,
+        stats_frame: pl.DataFrame | None,
+    ) -> bool:
+        """Inject derived career/service metrics into the current payload."""
+
+        if self._current_payload is None:
+            return False
+
+        computed_data = self._current_payload.get("_computed_details")
+        computed: dict[str, float] = dict(computed_data) if isinstance(computed_data, dict) else {}
+        updated = False
+
+        def _store_numeric(key: str, candidate: Any) -> None:
+            nonlocal updated
+            numeric = self._parse_numeric(candidate)
+            if numeric is None:
+                return
+            if key in computed and computed[key] == numeric:
+                return
+            computed[key] = float(numeric)
+            updated = True
+
+        def _store_text(key: str, candidate: Any) -> None:
+            nonlocal updated
+            text_value = self._safe_str(candidate)
+            if not text_value:
+                return
+            if text_value.upper() == "N/A":
+                return
+            if computed.get(key) == text_value:
+                return
+            computed[key] = text_value
+            updated = True
+
+        if summary:
+            _store_numeric("career_games", summary.get("games"))
+            _store_numeric("career_snaps", summary.get("snaps"))
+
+        if stats_frame is not None and stats_frame.height > 0:
+            seasons = self._extract_seasons_from_frame(stats_frame)
+            if seasons:
+                derived_years = float(len(seasons))
+                if computed.get("service_years") != derived_years:
+                    computed["service_years"] = derived_years
+                    updated = True
+
+            def _sum_column(frame: pl.DataFrame, column: str) -> float:
+                return float(
+                    frame[column]
+                    .cast(pl.Float64, strict=False)
+                    .fill_null(0.0)
+                    .sum()
+                )
+
+            snap_total: float | None = None
+            if "snaps_total" in stats_frame.columns:
+                snap_total = _sum_column(stats_frame, "snaps_total")
+            elif "snaps" in stats_frame.columns:
+                snap_total = _sum_column(stats_frame, "snaps")
+            else:
+                subtotal = 0.0
+                found = False
+                for column in ("offense_snaps", "defense_snaps", "special_teams_snaps"):
+                    if column not in stats_frame.columns:
+                        continue
+                    subtotal += _sum_column(stats_frame, column)
+                    found = True
+                if found:
+                    snap_total = subtotal
+            if snap_total is not None and snap_total > 0:
+                _store_numeric("career_snaps", snap_total)
+
+            game_total: float | None = None
+            for column in ("games", "games_played", "games_active"):
+                if column in stats_frame.columns:
+                    game_total = _sum_column(stats_frame, column)
+                    break
+            if game_total is not None and game_total > 0:
+                _store_numeric("career_games", game_total)
+
+            for column, key in [
+                ("handedness", "handedness"),
+                ("birth_city", "birth_city"),
+                ("birth_state", "birth_state"),
+                ("birth_country", "birth_country"),
+            ]:
+                if column in stats_frame.columns and stats_frame.height > 0:
+                    value = stats_frame[column][0]
+                    if value and value != "N/A":
+                        _store_text(key, value)
+
+        missing_bio_fields = [
+            key
+            for key in ("handedness", "birth_city", "birth_state")
+            if not self._safe_str(computed.get(key))
+        ]
+        if (
+            missing_bio_fields
+            and hasattr(self, "_service")
+            and self._service is not None
+            and self._current_player is not None
+        ):
+            try:
+                bio_details = self._service.fetch_player_bio_details(self._current_player)
+            except Exception:
+                bio_details = {}
+            for key in ("handedness", "birth_city", "birth_state", "birth_country"):
+                if bio_details.get(key):
+                    _store_text(key, bio_details[key])
+
+        if updated:
+            payload_copy = dict(self._current_payload)
+            payload_copy["_computed_details"] = computed
+            self._current_payload = payload_copy
+        return updated
 
     def _apply_player_flags(self, flags: PlayerTypeFlags) -> None:
         """Copy computed player-type flags into the page state."""
@@ -756,7 +888,10 @@ class PlayerDetailPage(SectionPage):
 
     def _build_personal_detail_rows(self) -> list[tuple[str, str]]:
         payload = self._current_payload or {}
-        raw = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
+        raw_data = payload.get("raw")
+        raw = raw_data if isinstance(raw_data, dict) else {}
+        computed_data = payload.get("_computed_details")
+        computed_details = computed_data if isinstance(computed_data, dict) else {}
 
         details: list[tuple[str, str]] = []
 
@@ -778,16 +913,20 @@ class PlayerDetailPage(SectionPage):
             raw.get("birth_place") if isinstance(raw, dict) else None,
             raw.get("city_of_birth") if isinstance(raw, dict) else None,
             payload.get("birth_city"),
+            computed_details.get("birth_city"),
         )
         birth_state = self._first_non_empty(
             raw.get("birth_state") if isinstance(raw, dict) else None,
             raw.get("state_of_birth") if isinstance(raw, dict) else None,
             raw.get("birth_state_province") if isinstance(raw, dict) else None,
+            payload.get("birth_state"),
+            computed_details.get("birth_state"),
         )
         birth_country = self._first_non_empty(
             raw.get("birth_country") if isinstance(raw, dict) else None,
             raw.get("country_of_birth") if isinstance(raw, dict) else None,
             payload.get("birth_country"),
+            computed_details.get("birth_country"),
         )
         birthplace_parts = [
             part.strip()
@@ -817,6 +956,7 @@ class PlayerDetailPage(SectionPage):
             raw.get("dominant_hand") if isinstance(raw, dict) else None,
             raw.get("hand") if isinstance(raw, dict) else None,
             payload.get("handedness"),
+            computed_details.get("handedness"),
         )
         details.append(("Handedness", self._format_text(handedness)))
 
@@ -836,15 +976,7 @@ class PlayerDetailPage(SectionPage):
         )
         details.append(("Salary (AAV)", salary_text))
 
-        signed_through = self._first_non_empty(
-            payload.get("signed_through"),
-            payload.get("contract_end"),
-            raw.get("signed_through") if isinstance(raw, dict) else None,
-            raw.get("contract_end") if isinstance(raw, dict) else None,
-            raw.get("contract_year_to") if isinstance(raw, dict) else None,
-            raw.get("contract_years") if isinstance(raw, dict) else None,
-        )
-        signed_text = self._format_signed_through(signed_through)
+        signed_text = self._derive_signed_through_text(payload, raw, computed_details)
         details.append(("Signed Through", signed_text))
 
         college = self._first_non_empty(
@@ -858,6 +990,8 @@ class PlayerDetailPage(SectionPage):
             payload,
             ["experience", "service_years", "seasons", "years_exp"],
         )
+        if years_value is None and computed_details:
+            years_value = self._extract_numeric_value(computed_details, ["service_years"])
         if years_value is None and isinstance(raw, dict):
             years_value = self._extract_numeric_value(
                 raw,
@@ -874,6 +1008,8 @@ class PlayerDetailPage(SectionPage):
             payload,
             ["career_games", "games", "games_played"],
         )
+        if games_value is None and computed_details:
+            games_value = self._extract_numeric_value(computed_details, ["career_games", "games"])
         if games_value is None and isinstance(raw, dict):
             games_value = self._extract_numeric_value(
                 raw,
@@ -881,7 +1017,9 @@ class PlayerDetailPage(SectionPage):
             )
 
         snaps_value = None
-        if isinstance(raw, dict):
+        if computed_details:
+            snaps_value = self._extract_numeric_value(computed_details, ["career_snaps", "snaps"])
+        if snaps_value is None and isinstance(raw, dict):
             snaps_value = self._extract_numeric_value(
                 raw,
                 [
@@ -897,6 +1035,10 @@ class PlayerDetailPage(SectionPage):
                 payload,
                 ["snaps", "career_snaps"],
             )
+        if (snaps_value is None or snaps_value <= 0) and self._season_rows:
+            table_snaps = self._sum_snaps_from_table()
+            if table_snaps not in (None, 0):
+                snaps_value = float(table_snaps)
 
         service_parts: list[str] = []
         if years_value is not None:
@@ -909,6 +1051,28 @@ class PlayerDetailPage(SectionPage):
         details.append(("Service (Years, Games, Snaps)", service_text))
 
         return details
+
+    def _sum_snaps_from_table(self) -> int | None:
+        if not self._season_rows or not self._table_columns:
+            return None
+
+        normalized_columns = [column.strip().lower() for column in self._table_columns]
+        for index, name in enumerate(normalized_columns):
+            if name not in self.SNAP_COLUMN_ALIASES:
+                continue
+            total = 0.0
+            has_value = False
+            for row in self._season_rows:
+                if index >= len(row):
+                    continue
+                parsed = self._parse_numeric(row[index])
+                if parsed is None:
+                    continue
+                total += parsed
+                has_value = True
+            if has_value:
+                return int(round(total))
+        return None
 
     def _compute_player_detail(
         self,
@@ -1046,6 +1210,9 @@ class PlayerDetailPage(SectionPage):
         stats = pl.DataFrame()
         player_id = player.profile.gsis_id
         if player_id:
+            summary_stats = self._service.get_player_summary_stats(player_id=player_id)
+            if summary_stats.height > 0:
+                return summary_stats
             if flags.is_quarterback:
                 stats = self._service.get_basic_offense_stats(player_id=player_id)
             if stats.is_empty():
@@ -1118,6 +1285,41 @@ class PlayerDetailPage(SectionPage):
                 continue
         return sorted(set(seasons))
 
+    def _build_cached_impact_map(
+        self,
+        data: pl.DataFrame,
+        column_mapping: dict[str, str],
+    ) -> dict[int, dict[str, float]] | None:
+        """Build an impact map directly from columns already present in the data."""
+
+        if data.height == 0 or "season" not in data.columns:
+            return None
+
+        available = {key: column for key, column in column_mapping.items() if column in data.columns}
+        if not available:
+            return None
+
+        grouped = (
+            data.group_by("season")
+            .agg(
+                [
+                    pl.col(column).cast(pl.Float64, strict=False).sum().alias(column)
+                    for column in available.values()
+                ]
+            )
+            .sort("season")
+        )
+
+        result: dict[int, dict[str, float]] = {}
+        for row in grouped.iter_rows(named=True):
+            season_value = row.get("season")
+            if season_value is None:
+                continue
+            result[int(season_value)] = {
+                key: float(row.get(column) or 0.0) for key, column in available.items()
+            }
+        return result
+
     def _get_quarterback_impact_map(
         self,
         player: Player,
@@ -1158,6 +1360,23 @@ class PlayerDetailPage(SectionPage):
         if not seasons:
             return {}
 
+        cached_map = self._build_cached_impact_map(
+            data,
+            {
+                "epa": "skill_epa",
+                "wpa": "skill_wpa",
+                "rush_20_plus": "skill_rush_20_plus",
+                "rec_20_plus": "skill_rec_20_plus",
+                "rec_first_downs": "skill_rec_first_downs",
+            },
+        )
+        if cached_map:
+            return (
+                {season: dict(cached_map[season]) for season in seasons if season in cached_map}
+                if seasons
+                else cached_map
+            )
+
         try:
             return self._service.get_skill_player_impacts(
                 player,
@@ -1184,6 +1403,20 @@ class PlayerDetailPage(SectionPage):
         if not seasons:
             return {}
 
+        cached_map = self._build_cached_impact_map(
+            data,
+            {
+                "epa": "def_epa",
+                "wpa": "def_wpa",
+            },
+        )
+        if cached_map:
+            return (
+                {season: dict(cached_map[season]) for season in seasons if season in cached_map}
+                if seasons
+                else cached_map
+            )
+
         try:
             return self._service.get_defensive_player_impacts(
                 player,
@@ -1207,6 +1440,20 @@ class PlayerDetailPage(SectionPage):
         seasons = self._extract_seasons_from_frame(data)
         if not seasons:
             return {}
+
+        cached_map = self._build_cached_impact_map(
+            data,
+            {
+                "epa": "ol_epa",
+                "wpa": "ol_wpa",
+            },
+        )
+        if cached_map:
+            return (
+                {season: dict(cached_map[season]) for season in seasons if season in cached_map}
+                if seasons
+                else cached_map
+            )
 
         try:
             return self._service.get_offensive_line_impacts(
@@ -1232,6 +1479,20 @@ class PlayerDetailPage(SectionPage):
         if not seasons:
             return {}
 
+        cached_map = self._build_cached_impact_map(
+            data,
+            {
+                "epa": "kicker_epa",
+                "wpa": "kicker_wpa",
+            },
+        )
+        if cached_map:
+            return (
+                {season: dict(cached_map[season]) for season in seasons if season in cached_map}
+                if seasons
+                else cached_map
+            )
+
         try:
             return self._service.get_kicker_impacts(
                 player,
@@ -1255,6 +1516,20 @@ class PlayerDetailPage(SectionPage):
         seasons = self._extract_seasons_from_frame(data)
         if not seasons:
             return {}
+
+        cached_map = self._build_cached_impact_map(
+            data,
+            {
+                "epa": "punter_epa",
+                "wpa": "punter_wpa",
+            },
+        )
+        if cached_map:
+            return (
+                {season: dict(cached_map[season]) for season in seasons if season in cached_map}
+                if seasons
+                else cached_map
+            )
 
         try:
             return self._service.get_punter_impacts(
@@ -1309,13 +1584,19 @@ class PlayerDetailPage(SectionPage):
             .alias("_games_raw")
         )
 
-        snap_cols = [col for col in ("offense_snaps", "defense_snaps", "special_teams_snaps", "snaps") if col in data.columns]
-        if snap_cols:
-            snap_expr = pl.sum_horizontal(
-                [pl.col(col).cast(pl.Int64, strict=False).fill_null(0) for col in snap_cols]
-            ).alias("_snaps")
+        # Use snaps_total if available, otherwise sum individual snap types, or fall back to snaps column
+        if "snaps_total" in data.columns:
+            snap_expr = pl.col("snaps_total").cast(pl.Int64, strict=False).fill_null(0).alias("_snaps")
+        elif "snaps" in data.columns:
+            snap_expr = pl.col("snaps").cast(pl.Int64, strict=False).fill_null(0).alias("_snaps")
         else:
-            snap_expr = pl.lit(0).alias("_snaps")
+            snap_cols = [col for col in ("offense_snaps", "defense_snaps", "special_teams_snaps") if col in data.columns]
+            if snap_cols:
+                snap_expr = pl.sum_horizontal(
+                    [pl.col(col).cast(pl.Int64, strict=False).fill_null(0) for col in snap_cols]
+                ).alias("_snaps")
+            else:
+                snap_expr = pl.lit(0).alias("_snaps")
 
         week_col = "week" if "week" in data.columns else None
 
@@ -1501,13 +1782,19 @@ class PlayerDetailPage(SectionPage):
             dtype=pl.Float64,
         )
 
-        snap_cols = [col for col in ("offense_snaps", "defense_snaps", "special_teams_snaps", "snaps") if col in data.columns]
-        if snap_cols:
-            snap_expr = pl.sum_horizontal(
-                [pl.col(col).cast(pl.Int64, strict=False).fill_null(0) for col in snap_cols]
-            ).alias("_snaps")
+        # Use snaps_total if available, otherwise sum individual snap types, or fall back to snaps column
+        if "snaps_total" in data.columns:
+            snap_expr = pl.col("snaps_total").cast(pl.Int64, strict=False).fill_null(0).alias("_snaps")
+        elif "snaps" in data.columns:
+            snap_expr = pl.col("snaps").cast(pl.Int64, strict=False).fill_null(0).alias("_snaps")
         else:
-            snap_expr = pl.lit(0).alias("_snaps")
+            snap_cols = [col for col in ("offense_snaps", "defense_snaps", "special_teams_snaps") if col in data.columns]
+            if snap_cols:
+                snap_expr = pl.sum_horizontal(
+                    [pl.col(col).cast(pl.Int64, strict=False).fill_null(0) for col in snap_cols]
+                ).alias("_snaps")
+            else:
+                snap_expr = pl.lit(0).alias("_snaps")
 
         rush_att_expr = self._coalesce_expr(
             data,
@@ -1670,13 +1957,21 @@ class PlayerDetailPage(SectionPage):
             dtype=pl.Float64,
         )
 
-        snap_cols = [col for col in ("defense_snaps", "snaps", "offense_snaps") if col in data.columns]
-        if snap_cols:
-            snap_expr = pl.sum_horizontal(
-                [pl.col(col).cast(pl.Int64, strict=False).fill_null(0) for col in snap_cols]
-            ).alias("_snps")
+        # Prioritize snaps_total, then defense_snaps for defensive players, then snaps column
+        if "snaps_total" in data.columns:
+            snap_expr = pl.col("snaps_total").cast(pl.Int64, strict=False).fill_null(0).alias("_snps")
+        elif "defense_snaps" in data.columns:
+            snap_expr = pl.col("defense_snaps").cast(pl.Int64, strict=False).fill_null(0).alias("_snps")
+        elif "snaps" in data.columns:
+            snap_expr = pl.col("snaps").cast(pl.Int64, strict=False).fill_null(0).alias("_snps")
         else:
-            snap_expr = pl.lit(0).alias("_snps")
+            snap_cols = [col for col in ("offense_snaps", "special_teams_snaps") if col in data.columns]
+            if snap_cols:
+                snap_expr = pl.sum_horizontal(
+                    [pl.col(col).cast(pl.Int64, strict=False).fill_null(0) for col in snap_cols]
+                ).alias("_snps")
+            else:
+                snap_expr = pl.lit(0).alias("_snps")
 
         def _stat_expr(columns: list[str], alias: str) -> pl.Expr:
             return self._coalesce_expr(
@@ -1805,11 +2100,13 @@ class PlayerDetailPage(SectionPage):
             dtype=pl.Float64,
         )
 
-        snap_cols = [col for col in ("offense_snaps", "snaps") if col in data.columns]
-        if snap_cols:
-            snap_expr = pl.sum_horizontal(
-                [pl.col(col).cast(pl.Int64, strict=False).fill_null(0) for col in snap_cols]
-            ).alias("_snps")
+        # Prioritize snaps_total, then offense_snaps for OL, then snaps column
+        if "snaps_total" in data.columns:
+            snap_expr = pl.col("snaps_total").cast(pl.Int64, strict=False).fill_null(0).alias("_snps")
+        elif "offense_snaps" in data.columns:
+            snap_expr = pl.col("offense_snaps").cast(pl.Int64, strict=False).fill_null(0).alias("_snps")
+        elif "snaps" in data.columns:
+            snap_expr = pl.col("snaps").cast(pl.Int64, strict=False).fill_null(0).alias("_snps")
         else:
             snap_expr = pl.lit(0).alias("_snps")
 
@@ -1940,11 +2237,13 @@ class PlayerDetailPage(SectionPage):
             dtype=pl.Float64,
         )
 
-        snap_cols = [col for col in ("special_teams_snaps", "snaps") if col in data.columns]
-        if snap_cols:
-            snap_expr = pl.sum_horizontal(
-                [pl.col(col).cast(pl.Int64, strict=False).fill_null(0) for col in snap_cols]
-            ).alias("_snps")
+        # Prioritize snaps_total, then special_teams_snaps for kickers, then snaps column
+        if "snaps_total" in data.columns:
+            snap_expr = pl.col("snaps_total").cast(pl.Int64, strict=False).fill_null(0).alias("_snps")
+        elif "special_teams_snaps" in data.columns:
+            snap_expr = pl.col("special_teams_snaps").cast(pl.Int64, strict=False).fill_null(0).alias("_snps")
+        elif "snaps" in data.columns:
+            snap_expr = pl.col("snaps").cast(pl.Int64, strict=False).fill_null(0).alias("_snps")
         else:
             snap_expr = pl.lit(0).alias("_snps")
 
@@ -2132,9 +2431,10 @@ class PlayerDetailPage(SectionPage):
             dtype=pl.Float64,
         )
 
+        # Prioritize snaps_total, then special_teams_snaps for punters, then snaps column
         snap_expr = self._coalesce_expr(
             data,
-            ["special_teams_snaps", "snaps"],
+            ["snaps_total", "special_teams_snaps", "snaps"],
             alias="_snps",
             default=0,
             dtype=pl.Float64,
@@ -3383,6 +3683,64 @@ class PlayerDetailPage(SectionPage):
         return None
 
     @staticmethod
+    def _derive_signed_through_text(
+        payload: dict[str, Any],
+        raw: dict[str, Any],
+        computed: dict[str, Any] | None = None,
+    ) -> str:
+        direct_value = PlayerDetailPage._first_non_empty(
+            payload.get("signed_through"),
+            payload.get("contract_end"),
+            raw.get("signed_through") if isinstance(raw, dict) else None,
+            raw.get("contract_end") if isinstance(raw, dict) else None,
+            raw.get("contract_year_to") if isinstance(raw, dict) else None,
+        )
+        if direct_value is not None:
+            return PlayerDetailPage._format_signed_through(direct_value)
+
+        sources = [payload, raw, computed if isinstance(computed, dict) else None]
+        start_year: float | None = None
+        contract_length: float | None = None
+
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            if start_year is None:
+                start_year = PlayerDetailPage._extract_numeric_value(
+                    source,
+                    [
+                        "contract_start",
+                        "contract_year_from",
+                        "year_signed",
+                        "signed_year",
+                        "deal_start_year",
+                    ],
+                )
+            if contract_length is None:
+                contract_length = PlayerDetailPage._extract_numeric_value(
+                    source,
+                    [
+                        "contract_years",
+                        "deal_length",
+                        "years",
+                    ],
+                )
+            if start_year is not None and contract_length is not None:
+                break
+
+        if start_year is not None and contract_length is not None:
+            try:
+                computed_year = int(round(start_year + max(contract_length, 0) - 1))
+            except (TypeError, ValueError):
+                computed_year = None
+            if computed_year:
+                return str(computed_year)
+
+        if start_year is not None:
+            return PlayerDetailPage._format_signed_through(start_year)
+        return "—"
+
+    @staticmethod
     def _derive_salary_text(payload: dict[str, Any], raw: dict[str, Any]) -> str:
         value = PlayerDetailPage._extract_numeric_value(
             payload,
@@ -3391,9 +3749,11 @@ class PlayerDetailPage(SectionPage):
                 "salary",
                 "contract_aav",
                 "apy",
+                "inflated_apy",
                 "aav",
                 "average_salary",
                 "apy_millions",
+                "apy_current",
             ],
         )
 
@@ -3404,6 +3764,7 @@ class PlayerDetailPage(SectionPage):
                     "salary_aav",
                     "contract_aav",
                     "apy",
+                    "inflated_apy",
                     "apy_current",
                     "average_salary",
                     "aav",
@@ -3411,6 +3772,49 @@ class PlayerDetailPage(SectionPage):
                     "apy_millions",
                 ],
             )
+
+        if value is None:
+            total_value = PlayerDetailPage._extract_numeric_value(
+                payload,
+                [
+                    "contract_total_value",
+                    "total_value",
+                    "value",
+                    "inflated_value",
+                ],
+            )
+            if total_value is None:
+                total_value = PlayerDetailPage._extract_numeric_value(
+                    raw,
+                    [
+                        "contract_total_value",
+                        "total_value",
+                        "value",
+                        "inflated_value",
+                    ],
+                )
+            length_value = PlayerDetailPage._extract_numeric_value(
+                payload,
+                [
+                    "contract_years",
+                    "deal_length",
+                    "years",
+                ],
+            )
+            if length_value is None:
+                length_value = PlayerDetailPage._extract_numeric_value(
+                    raw,
+                    [
+                        "contract_years",
+                        "deal_length",
+                        "years",
+                    ],
+                )
+            if total_value is not None and length_value not in (None, 0):
+                try:
+                    value = total_value / length_value
+                except ZeroDivisionError:
+                    value = None
 
         if value is None:
             return "—"
