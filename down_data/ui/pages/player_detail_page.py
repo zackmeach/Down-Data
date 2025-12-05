@@ -1676,11 +1676,19 @@ class PlayerDetailPage(SectionPage):
             )
         )
 
+        # Aggregate by season only (merging multi-team seasons)
         aggregated = (
-            prepared.group_by("season", "_team")
+            prepared.group_by("season")
             .agg(
+                # Concatenate unique team names for multi-team seasons
+                pl.col("_team")
+                .filter(pl.col("_team").is_not_null())
+                .unique()
+                .sort()
+                .str.join(", ")
+                .alias("_team"),
                 pl.col("_position").drop_nulls().first().alias("_position"),
-                pl.col("_games_raw").max().alias("_games_raw"),
+                pl.col("_games_raw").sum().alias("_games_raw"),
                 pl.col("_week").drop_nulls().n_unique().alias("_games_from_weeks"),
                 pl.col("_snaps").sum().alias("_snaps"),
                 pl.col("_def_solo").sum().alias("_def_solo"),
@@ -1701,7 +1709,7 @@ class PlayerDetailPage(SectionPage):
                 .fill_null("")
                 .alias("_position"),
             )
-            .sort(["season", "_team"], descending=[True, False])
+            .sort("season", descending=True)
         )
 
         rows: list[list[str]] = []
@@ -1890,11 +1898,19 @@ class PlayerDetailPage(SectionPage):
         else:
             select_columns.append(pl.lit(None).alias("_week"))
 
+        # First aggregate by season only (merging multi-team seasons)
         aggregated = (
             prepared.select(select_columns)
-            .group_by("season", "_team")
+            .group_by("season")
             .agg(
-                pl.col("_games_raw").max().alias("_games_raw"),
+                # Concatenate unique team names for multi-team seasons
+                pl.col("_team")
+                .filter(pl.col("_team").str.len_chars() > 0)
+                .unique()
+                .sort()
+                .str.join(", ")
+                .alias("_team"),
+                pl.col("_games_raw").sum().alias("_games_raw"),
                 pl.col("_week").drop_nulls().n_unique().alias("_games_from_weeks"),
                 pl.col("_snaps").sum().alias("_snaps"),
                 pl.col("_rush_att").sum().alias("_rush_att"),
@@ -1914,7 +1930,7 @@ class PlayerDetailPage(SectionPage):
                 .alias("_games"),
                 pl.col("_team").fill_null("").alias("_team"),
             )
-            .sort(["season", "_team"], descending=[True, False])
+            .sort("season", descending=True)
         )
 
         return aggregated
@@ -2040,12 +2056,20 @@ class PlayerDetailPage(SectionPage):
         else:
             select_columns.append(pl.lit(None).alias("_week"))
 
+        # Aggregate by season only (merging multi-team seasons)
         aggregated = (
             prepared.select(select_columns)
-            .group_by("season", "_team")
+            .group_by("season")
             .agg(
+                # Concatenate unique team names for multi-team seasons
+                pl.col("_team")
+                .filter(pl.col("_team").str.len_chars() > 0)
+                .unique()
+                .sort()
+                .str.join(", ")
+                .alias("_team"),
                 pl.col("_position").drop_nulls().first().alias("_position"),
-                pl.col("_games_raw").max().alias("_games_raw"),
+                pl.col("_games_raw").sum().alias("_games_raw"),
                 pl.col("_week").drop_nulls().n_unique().alias("_games_from_weeks"),
                 pl.col("_snps").sum().alias("_snps"),
                 pl.col("_solo").sum().alias("_solo"),
@@ -2069,7 +2093,7 @@ class PlayerDetailPage(SectionPage):
                 pl.col("_team").fill_null("").alias("_team"),
                 pl.col("_position").fill_null("").alias("_position"),
             )
-            .sort(["season", "_team"], descending=[True, False])
+            .sort("season", descending=True)
         )
 
         return aggregated
@@ -2183,11 +2207,19 @@ class PlayerDetailPage(SectionPage):
         else:
             select_columns.append(pl.lit(None).alias("_week"))
 
+        # Aggregate by season only (merging multi-team seasons)
         aggregated = (
             prepared.select(select_columns)
-            .group_by("season", "_team")
+            .group_by("season")
             .agg(
-                pl.col("_games_raw").max().alias("_games_raw"),
+                # Concatenate unique team names for multi-team seasons
+                pl.col("_team")
+                .filter(pl.col("_team").str.len_chars() > 0)
+                .unique()
+                .sort()
+                .str.join(", ")
+                .alias("_team"),
+                pl.col("_games_raw").sum().alias("_games_raw"),
                 pl.col("_week").drop_nulls().n_unique().alias("_games_from_weeks"),
                 pl.col("_snps").sum().alias("_snps"),
                 pl.col("_off_snps").sum().alias("_off_snps"),
@@ -2206,7 +2238,7 @@ class PlayerDetailPage(SectionPage):
                 .alias("_games"),
                 pl.col("_team").fill_null("").alias("_team"),
             )
-            .sort(["season", "_team"], descending=[True, False])
+            .sort("season", descending=True)
         )
 
         return aggregated
@@ -2367,11 +2399,19 @@ class PlayerDetailPage(SectionPage):
         else:
             select_columns.append(pl.lit(None).alias("_week"))
 
+        # Aggregate by season only (merging multi-team seasons)
         aggregated = (
             prepared.select(select_columns)
-            .group_by("season", "_team")
+            .group_by("season")
             .agg(
-                pl.col("_games_raw").max().alias("_games_raw"),
+                # Concatenate unique team names for multi-team seasons
+                pl.col("_team")
+                .filter(pl.col("_team").str.len_chars() > 0)
+                .unique()
+                .sort()
+                .str.join(", ")
+                .alias("_team"),
+                pl.col("_games_raw").sum().alias("_games_raw"),
                 pl.col("_week").drop_nulls().n_unique().alias("_games_from_weeks"),
                 pl.col("_snps").sum().alias("_snps"),
                 pl.col("_fgm").sum().alias("_fgm"),
@@ -2400,7 +2440,7 @@ class PlayerDetailPage(SectionPage):
                 .alias("_games"),
                 pl.col("_team").fill_null("").alias("_team"),
             )
-            .sort(["season", "_team"], descending=[True, False])
+            .sort("season", descending=True)
         )
 
         return aggregated
@@ -2495,11 +2535,19 @@ class PlayerDetailPage(SectionPage):
         else:
             select_columns.append(pl.lit(None).alias("_week"))
 
+        # Aggregate by season only (merging multi-team seasons)
         aggregated = (
             prepared.select(select_columns)
-            .group_by("season", "_team")
+            .group_by("season")
             .agg(
-                pl.col("_games_raw").max().alias("_games_raw"),
+                # Concatenate unique team names for multi-team seasons
+                pl.col("_team")
+                .filter(pl.col("_team").str.len_chars() > 0)
+                .unique()
+                .sort()
+                .str.join(", ")
+                .alias("_team"),
+                pl.col("_games_raw").sum().alias("_games_raw"),
                 pl.col("_week").drop_nulls().n_unique().alias("_games_from_weeks"),
                 pl.col("_snps").sum().alias("_snps"),
                 pl.col("_punts").sum().alias("_punts"),
@@ -2519,7 +2567,7 @@ class PlayerDetailPage(SectionPage):
                 .alias("_games"),
                 pl.col("_team").fill_null("").alias("_team"),
             )
-            .sort(["season", "_team"], descending=[True, False])
+            .sort("season", descending=True)
         )
 
         return aggregated
@@ -2588,7 +2636,7 @@ class PlayerDetailPage(SectionPage):
                 self._format_value(team_value),
                 team_record or "—",
                 self._format_int(games_played),
-                self._format_int(snaps_played),
+                self._format_snaps(snaps_played, games_played),
                 self._format_float(wpa_value, 3),
                 self._format_float(epa_value, 1),
                 self._format_int(total_td),
@@ -2682,7 +2730,7 @@ class PlayerDetailPage(SectionPage):
                 self._format_value(team_value),
                 team_record or "—",
                 self._format_int(games_played),
-                self._format_int(snaps_played),
+                self._format_snaps(snaps_played, games_played),
                 self._format_float(wpa_value, 3),
                 self._format_float(epa_value, 1),
                 self._format_int(total_td),
@@ -2762,7 +2810,7 @@ class PlayerDetailPage(SectionPage):
                     self._format_value(team_value),
                     team_record or "—",
                     self._format_int(games_played),
-                    self._format_int(snaps_played),
+                    self._format_snaps(snaps_played, games_played),
                     self._format_float(wpa_value, 3),
                     self._format_float(epa_value, 1),
                     self._format_int(off_snps),
@@ -2846,7 +2894,7 @@ class PlayerDetailPage(SectionPage):
                     self._format_value(team_value),
                     team_record or "—",
                     self._format_int(games_played),
-                    self._format_int(snaps_played),
+                    self._format_snaps(snaps_played, games_played),
                     self._format_float(wpa_value, 3),
                     self._format_float(epa_value, 1),
                     self._format_int(fgm),
@@ -2935,7 +2983,7 @@ class PlayerDetailPage(SectionPage):
                     self._format_value(team_value),
                     team_record or "—",
                     self._format_int(games_played),
-                    self._format_int(snaps_played),
+                    self._format_snaps(snaps_played, games_played),
                     self._format_float(wpa_value, 3),
                     self._format_float(epa_value, 1),
                     self._format_int(punts),
@@ -3018,7 +3066,7 @@ class PlayerDetailPage(SectionPage):
                 self._format_value(team_value),
                 team_record or "—",
                 self._format_int(games_played),
-                self._format_int(snaps_played),
+                self._format_snaps(snaps_played, games_played),
                 self._format_float(wpa_value, 3),
                 self._format_float(epa_value, 1),
             ]
@@ -3169,7 +3217,7 @@ class PlayerDetailPage(SectionPage):
                 self._format_value(team_value),
                 team_record or "—",
                 self._format_int(games_played),
-                self._format_int(snaps_played),
+                self._format_snaps(snaps_played, games_played),
                 self._format_float(wpa_value, 3),
                 self._format_float(epa_value, 1),
                 self._format_float(qb_rating, 1),
@@ -3331,8 +3379,16 @@ class PlayerDetailPage(SectionPage):
         if week_col is not None:
             agg_exprs.append(pl.col(week_col).cast(pl.Int64, strict=False).alias("_week"))
 
-        aggregation = prepared.group_by("season", "_team").agg(
-            pl.col("_games_raw").max().alias("_games_raw"),
+        # Aggregate by season only (merging multi-team seasons)
+        aggregation = prepared.group_by("season").agg(
+            # Concatenate unique team names for multi-team seasons
+            pl.col("_team")
+            .filter(pl.col("_team").is_not_null())
+            .unique()
+            .sort()
+            .str.join(", ")
+            .alias("_team"),
+            pl.col("_games_raw").sum().alias("_games_raw"),
             pl.col("_week").drop_nulls().n_unique().alias("_games_from_weeks"),
             pl.col("_pass_comp").sum().alias("_pass_comp"),
             pl.col("_pass_att").sum().alias("_pass_att"),
@@ -3360,7 +3416,7 @@ class PlayerDetailPage(SectionPage):
                 .cast(pl.Int64, strict=False)
                 .alias("_games")
             )
-            .sort(["season", "_team"], descending=[True, False])
+            .sort("season", descending=True)
         )
 
         rows: list[list[str]] = []
@@ -3432,7 +3488,7 @@ class PlayerDetailPage(SectionPage):
                 self._format_value(team_value),
                 team_record or "—",
                 self._format_int(games_played),
-                self._format_int(snaps_played),
+                self._format_snaps(snaps_played, games_played),
                 self._format_float(wpa_value, 3),
                 self._format_float(epa_value, 1),
                 self._format_float(qb_rating, 1),
@@ -3500,13 +3556,25 @@ class PlayerDetailPage(SectionPage):
         return ((a + b + c + d) / 6) * 100
 
     @staticmethod
-    def _format_float(value: float | int | None, decimals: int = 1) -> str:
+    def _format_float(value: float | int | None, decimals: int = 1, show_dash_if_none: bool = True) -> str:
         if value is None:
-            return ""
+            return "—" if show_dash_if_none else ""
         if isinstance(value, float) and math.isnan(value):
-            return ""
+            return "—" if show_dash_if_none else ""
         format_str = f"{{:.{decimals}f}}"
         return format_str.format(float(value))
+
+    @staticmethod
+    def _format_snaps(snaps: int | float | None, games: int | float | None) -> str:
+        """Format snap count, showing '—' if snaps is 0/missing but player has games."""
+        if snaps is None:
+            return "—"
+        snaps_int = int(round(snaps)) if not (isinstance(snaps, float) and math.isnan(snaps)) else 0
+        games_int = int(round(games)) if games is not None and not (isinstance(games, float) and math.isnan(games)) else 0
+        # If player has games but no snap data, show "—" instead of misleading "0"
+        if snaps_int == 0 and games_int > 0:
+            return "—"
+        return str(snaps_int)
 
     @staticmethod
     def _format_team_record(wins: int, losses: int, ties: int) -> str:

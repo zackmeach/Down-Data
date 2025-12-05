@@ -1083,9 +1083,9 @@ class NFLDataBuilder:
             "pass_attempts": ["attempts"],
             "passing_yards": ["passing_yards"],
             "passing_tds": ["passing_tds"],
-            "passing_ints": ["interceptions"],
-            "sacks_taken": ["sacks_suffered"],
-            "sack_yards": ["sack_yards_lost"],
+            "passing_ints": ["passing_interceptions", "interceptions"],  # nflverse uses passing_interceptions
+            "sacks_taken": ["sacks_suffered", "sacks"],
+            "sack_yards": ["sack_yards_lost", "sack_yards"],
             "rushing_attempts": ["carries", "rushing_attempts"],
             "rushing_yards": ["rushing_yards"],
             "rushing_tds": ["rushing_tds"],
@@ -1308,34 +1308,94 @@ class NFLDataBuilder:
         
         frames = []
         
-        # QB impacts
+        # QB impacts - use wpa column if qb_wpa doesn't exist
         if "passer_player_id" in pbp.columns:
+            # qb_epa is usually available, but qb_wpa might not be - use wpa instead
+            wpa_col = "qb_wpa" if "qb_wpa" in pbp.columns else "wpa"
+            epa_col = "qb_epa" if "qb_epa" in pbp.columns else "epa"
             qb_data = (
                 pbp.filter(pl.col("passer_player_id").is_not_null())
                 .group_by("passer_player_id")
                 .agg([
-                    _numeric_expr("qb_epa").sum().alias("qb_epa"),
-                    _numeric_expr("qb_wpa").sum().alias("qb_wpa"),
+                    _numeric_expr(epa_col).sum().alias("qb_epa"),
+                    _numeric_expr(wpa_col).sum().alias("qb_wpa"),
                 ])
                 .rename({"passer_player_id": "player_id"})
                 .with_columns(pl.lit(season).cast(pl.Int16).alias("season"))
             )
             frames.append(qb_data)
         
-        # Skill impacts (rusher + receiver)
-        for role, col in [("rusher", "rusher_player_id"), ("receiver", "receiver_player_id")]:
-            if col in pbp.columns:
-                role_data = (
-                    pbp.filter(pl.col(col).is_not_null())
-                    .group_by(col)
-                    .agg([
-                        _numeric_expr("epa").sum().alias("skill_epa"),
-                        _numeric_expr("wpa").sum().alias("skill_wpa"),
-                    ])
-                    .rename({col: "player_id"})
-                    .with_columns(pl.lit(season).cast(pl.Int16).alias("season"))
+        # Skill impacts (rusher + receiver) with explosive play and first down counts
+        # First, prepare explosive play flags
+        yards_col = "yards_gained" if "yards_gained" in pbp.columns else None
+        complete_col = "complete_pass" if "complete_pass" in pbp.columns else None
+        first_down_col = "first_down" if "first_down" in pbp.columns else None
+        
+        # Rusher impacts
+        if "rusher_player_id" in pbp.columns:
+            rusher_aggs = [
+                _numeric_expr("epa").sum().alias("skill_epa"),
+                _numeric_expr("wpa").sum().alias("skill_wpa"),
+            ]
+            # Add 20+ yard rush count
+            if yards_col:
+                rusher_aggs.append(
+                    pl.when(pl.col(yards_col).cast(pl.Float64, strict=False).fill_null(0.0) >= 20)
+                    .then(1)
+                    .otherwise(0)
+                    .sum()
+                    .cast(pl.Int32)
+                    .alias("skill_rush_20_plus")
                 )
-                frames.append(role_data)
+            rusher_data = (
+                pbp.filter(pl.col("rusher_player_id").is_not_null())
+                .group_by("rusher_player_id")
+                .agg(rusher_aggs)
+                .rename({"rusher_player_id": "player_id"})
+                .with_columns(pl.lit(season).cast(pl.Int16).alias("season"))
+            )
+            frames.append(rusher_data)
+        
+        # Receiver impacts
+        if "receiver_player_id" in pbp.columns:
+            receiver_aggs = [
+                _numeric_expr("epa").sum().alias("skill_epa"),
+                _numeric_expr("wpa").sum().alias("skill_wpa"),
+            ]
+            # Add 20+ yard reception count (only count completed passes)
+            if yards_col:
+                rec_20_condition = pl.col(yards_col).cast(pl.Float64, strict=False).fill_null(0.0) >= 20
+                if complete_col:
+                    rec_20_condition = rec_20_condition & (pl.col(complete_col) == 1)
+                receiver_aggs.append(
+                    pl.when(rec_20_condition)
+                    .then(1)
+                    .otherwise(0)
+                    .sum()
+                    .cast(pl.Int32)
+                    .alias("skill_rec_20_plus")
+                )
+            # Add first down count (only count completed passes that resulted in first downs)
+            if first_down_col:
+                first_down_condition = pl.col(first_down_col) == 1
+                if complete_col:
+                    first_down_condition = first_down_condition & (pl.col(complete_col) == 1)
+                receiver_aggs.append(
+                    pl.when(first_down_condition)
+                    .then(1)
+                    .otherwise(0)
+                    .sum()
+                    .cast(pl.Int32)
+                    .alias("skill_rec_first_downs")
+                )
+            receiver_data = (
+                pbp.filter(pl.col("receiver_player_id").is_not_null())
+                .group_by("receiver_player_id")
+                .agg(receiver_aggs)
+                .rename({"receiver_player_id": "player_id"})
+                .with_columns(pl.lit(season).cast(pl.Int16).alias("season"))
+            )
+            frames.append(receiver_data)
         
         # Defensive impacts
         def_cols = [
